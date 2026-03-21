@@ -1,0 +1,180 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Envelope — every event gets wrapped with correlation + timing metadata
+// ---------------------------------------------------------------------------
+
+/// A timestamped, correlated event. The correlation_id ties together all events
+/// from a single bootstrap iteration for a single nutraceutical.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    /// Unique ID for this specific event
+    pub event_id: Uuid,
+    /// Groups related events (e.g. one bootstrap iteration for "Magnesium")
+    pub correlation_id: Uuid,
+    /// When this event was emitted
+    pub timestamp: DateTime<Utc>,
+    /// The actual event payload
+    pub event: PipelineEvent,
+}
+
+impl EventEnvelope {
+    pub fn new(correlation_id: Uuid, event: PipelineEvent) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            correlation_id,
+            timestamp: Utc::now(),
+            event,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline events — typed representation of every data exchange
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PipelineEvent {
+    // -- LLM interactions (Phase 2) ---------------------------------------
+
+    /// An LLM request is about to be sent
+    LlmRequest {
+        provider: String,
+        model: String,
+        prompt: String,
+        nutraceutical: String,
+        stage: CurriculumStage,
+        question_type: String,
+    },
+
+    /// An LLM response was received
+    LlmResponse {
+        provider: String,
+        model: String,
+        raw_response: String,
+        latency_ms: u64,
+        tokens_used: Option<TokenUsage>,
+    },
+
+    /// An LLM call failed
+    LlmError {
+        provider: String,
+        model: String,
+        error: String,
+    },
+
+    // -- Extraction (Phase 3) ---------------------------------------------
+
+    /// Raw LLM response entering the extraction parser
+    ExtractionInput {
+        raw_response: String,
+        nutraceutical: String,
+        stage: CurriculumStage,
+    },
+
+    /// Structured output from the extraction parser
+    ExtractionOutput {
+        nodes_added: Vec<NodeRef>,
+        edges_added: Vec<EdgeRef>,
+        parse_warnings: Vec<String>,
+    },
+
+    // -- Speculative inference (Phase 4) ----------------------------------
+
+    /// A candidate claim generated from graph topology
+    SpeculativeClaim {
+        claim: String,
+        topology_justification: String,
+        source_nodes: Vec<String>,
+    },
+
+    // -- Review pipeline (Phase 5) ----------------------------------------
+
+    /// Result of multi-LLM review of a speculative claim
+    ReviewResult {
+        claim: String,
+        provider_scores: Vec<ProviderScore>,
+        final_confidence: f64,
+        verdict: ReviewVerdict,
+    },
+
+    // -- Graph mutations (any phase) --------------------------------------
+
+    /// A node was added or updated in the knowledge graph
+    GraphNodeMutation {
+        operation: MutationOp,
+        node_name: String,
+        node_type: String,
+    },
+
+    /// An edge was added or updated in the knowledge graph
+    GraphEdgeMutation {
+        operation: MutationOp,
+        source_node: String,
+        target_node: String,
+        edge_type: String,
+        confidence: f64,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Supporting types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CurriculumStage {
+    /// Stage 1: basic systems, mechanisms, therapeutic uses
+    Foundational,
+    /// Stage 2: cross-system links, contraindications, interactions
+    Relational,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// Lightweight reference to a node (for logging, not the actual graph node)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRef {
+    pub name: String,
+    pub node_type: String,
+}
+
+/// Lightweight reference to an edge (for logging, not the actual graph edge)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeRef {
+    pub source: String,
+    pub target: String,
+    pub edge_type: String,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderScore {
+    pub provider: String,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReviewVerdict {
+    /// LLMs agree and can cite mechanisms
+    Confirmed,
+    /// Reasonable but unconfirmed — the discovery track
+    Plausible,
+    /// LLMs disagree
+    Contested,
+    /// LLMs reject the claim
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MutationOp {
+    Added,
+    Updated,
+    Removed,
+}

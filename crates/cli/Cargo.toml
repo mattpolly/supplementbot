@@ -1,0 +1,16 @@
+[package]
+name = "supplementbot-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "supplementbot"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+curriculum = { path = "../curriculum" }
+event-log = { path = "../event-log" }
+llm-client = { path = "../llm-client", features = ["mock"] }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
