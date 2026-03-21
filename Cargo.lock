@@ -240,6 +240,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -271,6 +277,19 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "extraction"
+version = "0.1.0"
+dependencies = [
+ "event-log",
+ "graph-service",
+ "llm-client",
+ "serde",
+ "serde_json",
+ "tokio",
  "uuid",
 ]
 
@@ -843,6 +862,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nsai-loop"
+version = "0.1.0"
+dependencies = [
+ "event-log",
+ "extraction",
+ "graph-service",
+ "llm-client",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1289,8 +1320,12 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "curriculum",
+ "dotenvy",
  "event-log",
+ "extraction",
+ "graph-service",
  "llm-client",
+ "nsai-loop",
  "tokio",
  "uuid",
 ]

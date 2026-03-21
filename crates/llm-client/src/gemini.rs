@@ -47,8 +47,8 @@ impl LlmProvider for GeminiProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let url = format!(
-            "{}/{}:generateContent?key={}",
-            GEMINI_API_URL, self.model, self.api_key
+            "{}/{}:generateContent",
+            GEMINI_API_URL, self.model
         );
 
         let contents = vec![GeminiContent {
@@ -77,6 +77,7 @@ impl LlmProvider for GeminiProvider {
         let response = self
             .client
             .post(&url)
+            .query(&[("key", &self.api_key)])
             .header("content-type", "application/json")
             .json(&body)
             .send()

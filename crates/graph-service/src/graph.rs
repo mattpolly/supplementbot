@@ -1,4 +1,5 @@
-use petgraph::graph::{DiGraph, NodeIndex};
+pub use petgraph::graph::NodeIndex;
+use petgraph::graph::DiGraph;
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,11 @@ impl KnowledgeGraph {
             .into_iter()
             .filter(|(_, data)| data.edge_type == *edge_type)
             .collect()
+    }
+
+    /// Iterate over all node indices
+    pub fn all_nodes(&self) -> Vec<NodeIndex> {
+        self.graph.node_indices().collect()
     }
 
     // -- Graph stats ------------------------------------------------------

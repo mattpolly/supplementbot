@@ -82,6 +82,35 @@ pub enum PipelineEvent {
         parse_warnings: Vec<String>,
     },
 
+    // -- NSAI loop (Phase 3) -----------------------------------------------
+
+    /// Graph analysis identified gaps to fill
+    GapAnalysis {
+        gaps: Vec<GapInfo>,
+        graph_nodes: usize,
+        graph_edges: usize,
+    },
+
+    /// Comprehension check: NSAI rephrased its understanding
+    ComprehensionCheck {
+        rephrase_prompt: String,
+        rephrase_response: String,
+        edges_confirmed: usize,
+        edges_new: usize,
+        edges_total: usize,
+    },
+
+    /// One iteration of the NSAI loop completed
+    LoopIteration {
+        iteration: u32,
+        phase: String,
+        gaps_found: usize,
+        nodes_before: usize,
+        nodes_after: usize,
+        edges_before: usize,
+        edges_after: usize,
+    },
+
     // -- Speculative inference (Phase 4) ----------------------------------
 
     /// A candidate claim generated from graph topology
@@ -152,6 +181,14 @@ pub struct EdgeRef {
     pub target: String,
     pub edge_type: String,
     pub confidence: f64,
+}
+
+/// A gap identified by graph analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GapInfo {
+    pub node_name: String,
+    pub gap_type: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

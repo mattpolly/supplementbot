@@ -8,16 +8,64 @@ use std::fmt;
 pub type Confidence = f64;
 
 // ---------------------------------------------------------------------------
+// Complexity — continuous dial for ontology visibility
+//
+// 0.0 = simplest (5th grade: "what does it do?")
+// 1.0 = full biochemistry (graduate level: cascades, feedback loops, gating)
+//
+// Every node type and edge type has a minimum complexity threshold.
+// A ComplexityLens at level X can see anything with threshold <= X.
+// ---------------------------------------------------------------------------
+pub type Complexity = f64;
+
+// ---------------------------------------------------------------------------
 // Node types — the nouns of the ontology
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum NodeType {
+    /// A supplement or nutraceutical (e.g. "Magnesium")
     Ingredient,
+    /// A body system (e.g. "nervous system", "muscular system")
     System,
+    /// A biological process or pathway (e.g. "calcium channel blocking")
     Mechanism,
+    /// A physiological sign (e.g. "muscle cramps", "fatigue")
     Symptom,
+    /// A therapeutic effect or quality (e.g. "muscle relaxation", "sleep quality")
     Property,
+    /// A signaling molecule, ion, or hormone (e.g. "calcium", "serotonin", "cortisol")
+    Substrate,
+    /// A molecular target (e.g. "NMDA receptor", "L-type calcium channel")
+    Receptor,
+}
+
+impl NodeType {
+    /// Minimum complexity level at which this node type becomes visible
+    pub fn min_complexity(&self) -> Complexity {
+        match self {
+            NodeType::Ingredient => 0.0,
+            NodeType::System => 0.0,
+            NodeType::Mechanism => 0.0,
+            NodeType::Symptom => 0.0,
+            NodeType::Property => 0.0,
+            NodeType::Substrate => 0.4,
+            NodeType::Receptor => 0.7,
+        }
+    }
+
+    /// All node types, ordered by complexity threshold
+    pub fn all() -> &'static [NodeType] {
+        &[
+            NodeType::Ingredient,
+            NodeType::System,
+            NodeType::Mechanism,
+            NodeType::Symptom,
+            NodeType::Property,
+            NodeType::Substrate,
+            NodeType::Receptor,
+        ]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -45,9 +93,13 @@ impl fmt::Display for NodeData {
 
 // ---------------------------------------------------------------------------
 // Edge types — the verbs of the ontology
+//
+// Organized by complexity threshold. Foundational types (0.0) are visible
+// at all levels. Advanced regulatory forces require higher complexity.
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeType {
+    // ── Foundational (0.0) — visible at all levels ──────────────────────
     /// Ingredient acts on a System
     ActsOn,
     /// Ingredient or Mechanism acts through a Mechanism
@@ -56,10 +108,129 @@ pub enum EdgeType {
     Affords,
     /// Symptom presents in a System
     PresentsIn,
+    /// Ingredient or Mechanism modulates (gain control) a System or Mechanism
+    Modulates,
+
+    // ── Intermediate (0.3–0.5) — 10th grade biology ─────────────────────
     /// Ingredient is contraindicated with another Ingredient or Mechanism
     ContraindicatedWith,
-    /// Ingredient or Mechanism modulates a System or Mechanism
-    Modulates,
+    /// Molecules compete for the same binding site (concentration-dependent)
+    CompetesWith,
+    /// Removing an inhibitor increases downstream activity
+    Disinhibits,
+
+    // ── Advanced (0.6–0.8) — college biochemistry ───────────────────────
+    /// Stores/sequesters a substrate for later release
+    Sequesters,
+    /// Releases a sequestered substrate on demand
+    Releases,
+    /// Nonlinear amplification through enzymatic cascades
+    Amplifies,
+    /// Prolonged stimulation reduces receptor sensitivity
+    Desensitizes,
+
+    // ── Expert (0.85–1.0) — graduate-level regulatory logic ─────────────
+    /// Output feeds back to increase its own input (runaway until terminated)
+    PositivelyReinforces,
+    /// All-or-nothing activation above a threshold
+    Gates,
+}
+
+impl EdgeType {
+    /// Minimum complexity level at which this edge type becomes visible
+    pub fn min_complexity(&self) -> Complexity {
+        match self {
+            // Foundational — a 5th grader can understand these
+            EdgeType::ActsOn => 0.0,
+            EdgeType::ViaMechanism => 0.0,
+            EdgeType::Affords => 0.0,
+            EdgeType::PresentsIn => 0.0,
+            EdgeType::Modulates => 0.0,
+
+            // Intermediate — 10th grade biology
+            EdgeType::ContraindicatedWith => 0.3,
+            EdgeType::CompetesWith => 0.4,
+            EdgeType::Disinhibits => 0.5,
+
+            // Advanced — college biochemistry
+            EdgeType::Sequesters => 0.6,
+            EdgeType::Releases => 0.6,
+            EdgeType::Amplifies => 0.7,
+            EdgeType::Desensitizes => 0.7,
+
+            // Expert — graduate-level
+            EdgeType::PositivelyReinforces => 0.85,
+            EdgeType::Gates => 0.9,
+        }
+    }
+
+    /// All edge types, ordered by complexity threshold
+    pub fn all() -> &'static [EdgeType] {
+        &[
+            EdgeType::ActsOn,
+            EdgeType::ViaMechanism,
+            EdgeType::Affords,
+            EdgeType::PresentsIn,
+            EdgeType::Modulates,
+            EdgeType::ContraindicatedWith,
+            EdgeType::CompetesWith,
+            EdgeType::Disinhibits,
+            EdgeType::Sequesters,
+            EdgeType::Releases,
+            EdgeType::Amplifies,
+            EdgeType::Desensitizes,
+            EdgeType::PositivelyReinforces,
+            EdgeType::Gates,
+        ]
+    }
+
+    /// Pairs that are clearly wrong for this edge type (denylist).
+    /// Returns true if this (source, target) combination should be rejected.
+    ///
+    /// We use a denylist rather than an allowlist because the LLMs are
+    /// inconsistent about node typing (e.g. "energy production" as Mechanism
+    /// vs Property). Strict allowlists reject too many valid triples.
+    /// The denylist catches only the semantically nonsensical cases.
+    pub fn is_invalid_pair(&self, source: &NodeType, target: &NodeType) -> bool {
+        use NodeType::*;
+        match self {
+            // presents_in is strictly Symptom → System
+            EdgeType::PresentsIn => {
+                !matches!(source, Symptom) || !matches!(target, System)
+            }
+            // acts_on should have Ingredient as source, System as target
+            EdgeType::ActsOn => {
+                !matches!(source, Ingredient) || !matches!(target, System)
+            }
+            // Everything else: allow unless it's obviously wrong
+            _ => false,
+        }
+    }
+
+    /// Check if a (source_type, target_type) pair is valid for this edge type
+    pub fn is_valid_pair(&self, source: &NodeType, target: &NodeType) -> bool {
+        !self.is_invalid_pair(source, target)
+    }
+
+    /// Simple description suitable for an LLM extraction prompt
+    pub fn prompt_description(&self) -> &'static str {
+        match self {
+            EdgeType::ActsOn => "acts_on: Ingredient → System",
+            EdgeType::ViaMechanism => "via_mechanism: Ingredient → Mechanism, or Mechanism → Mechanism",
+            EdgeType::Affords => "affords: Ingredient → Property, or Mechanism → Property",
+            EdgeType::PresentsIn => "presents_in: Symptom → System",
+            EdgeType::Modulates => "modulates: adjusts sensitivity of a System or Mechanism (gain control)",
+            EdgeType::ContraindicatedWith => "contraindicated_with: should not be combined with",
+            EdgeType::CompetesWith => "competes_with: molecules competing for the same binding site",
+            EdgeType::Disinhibits => "disinhibits: removes an inhibitor, increasing downstream activity",
+            EdgeType::Sequesters => "sequesters: stores a molecule for later release",
+            EdgeType::Releases => "releases: releases a stored molecule on demand",
+            EdgeType::Amplifies => "amplifies: small input produces large output (cascade)",
+            EdgeType::Desensitizes => "desensitizes: prolonged exposure reduces sensitivity",
+            EdgeType::PositivelyReinforces => "positively_reinforces: output feeds back to increase its own input",
+            EdgeType::Gates => "gates: all-or-nothing activation above a threshold",
+        }
+    }
 }
 
 impl fmt::Display for EdgeType {
@@ -71,6 +242,14 @@ impl fmt::Display for EdgeType {
             EdgeType::PresentsIn => write!(f, "presents_in"),
             EdgeType::ContraindicatedWith => write!(f, "contraindicated_with"),
             EdgeType::Modulates => write!(f, "modulates"),
+            EdgeType::CompetesWith => write!(f, "competes_with"),
+            EdgeType::Disinhibits => write!(f, "disinhibits"),
+            EdgeType::Sequesters => write!(f, "sequesters"),
+            EdgeType::Releases => write!(f, "releases"),
+            EdgeType::Amplifies => write!(f, "amplifies"),
+            EdgeType::Desensitizes => write!(f, "desensitizes"),
+            EdgeType::PositivelyReinforces => write!(f, "positively_reinforces"),
+            EdgeType::Gates => write!(f, "gates"),
         }
     }
 }

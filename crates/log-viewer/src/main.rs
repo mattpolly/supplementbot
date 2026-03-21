@@ -84,6 +84,14 @@ fn matches_filter(event: &PipelineEvent, filter: &str) -> bool {
             event,
             PipelineEvent::GraphNodeMutation { .. } | PipelineEvent::GraphEdgeMutation { .. }
         ),
+        "loop" => matches!(
+            event,
+            PipelineEvent::LoopIteration { .. }
+                | PipelineEvent::GapAnalysis { .. }
+                | PipelineEvent::ComprehensionCheck { .. }
+        ),
+        "gap" => matches!(event, PipelineEvent::GapAnalysis { .. }),
+        "comprehension" => matches!(event, PipelineEvent::ComprehensionCheck { .. }),
         _ => true,
     }
 }
@@ -258,6 +266,57 @@ fn print_event(envelope: &EventEnvelope, base_time: DateTime<Utc>) {
                 "  [{:>8.3}s] ── \x1b[36mGRAPH\x1b[0m ── {:?} edge: {} ──[{}]──▶ {} (conf: {:.2}) ({})",
                 secs, operation, source_node, edge_type, target_node, confidence, corr_short
             );
+        }
+
+        PipelineEvent::GapAnalysis {
+            gaps,
+            graph_nodes,
+            graph_edges,
+        } => {
+            println!(
+                "  [{:>8.3}s] ── \x1b[35mGAP ANALYSIS\x1b[0m ── {} gaps found (graph: {} nodes, {} edges) ({})",
+                secs, gaps.len(), graph_nodes, graph_edges, corr_short
+            );
+            for gap in gaps {
+                println!(
+                    "              [{}] {} — {}",
+                    gap.gap_type, gap.node_name, gap.description
+                );
+            }
+            println!();
+        }
+
+        PipelineEvent::ComprehensionCheck {
+            rephrase_response,
+            edges_confirmed,
+            edges_new,
+            edges_total,
+            ..
+        } => {
+            println!(
+                "  [{:>8.3}s] ── \x1b[33mCOMPREHENSION\x1b[0m ── confirmed: {}, new: {}, total: {} ({})",
+                secs, edges_confirmed, edges_new, edges_total, corr_short
+            );
+            let truncated = truncate(rephrase_response, 120);
+            println!("              \"{}\"", truncated);
+            println!();
+        }
+
+        PipelineEvent::LoopIteration {
+            iteration,
+            phase,
+            gaps_found,
+            nodes_before,
+            nodes_after,
+            edges_before,
+            edges_after,
+        } => {
+            println!(
+                "  [{:>8.3}s] ── \x1b[34mLOOP\x1b[0m ── iter {} ({}) — gaps: {}, nodes: {}→{}, edges: {}→{} ({})",
+                secs, iteration, phase, gaps_found,
+                nodes_before, nodes_after, edges_before, edges_after, corr_short
+            );
+            println!();
         }
     }
 }
