@@ -79,10 +79,17 @@ fn matches_filter(event: &PipelineEvent, filter: &str) -> bool {
             PipelineEvent::ExtractionInput { .. } | PipelineEvent::ExtractionOutput { .. }
         ),
         "claim" => matches!(event, PipelineEvent::SpeculativeClaim { .. }),
+        "deduction" => matches!(event, PipelineEvent::ForwardChain { .. }),
         "review" => matches!(event, PipelineEvent::ReviewResult { .. }),
         "mutation" => matches!(
             event,
-            PipelineEvent::GraphNodeMutation { .. } | PipelineEvent::GraphEdgeMutation { .. }
+            PipelineEvent::GraphNodeMutation { .. }
+                | PipelineEvent::GraphEdgeMutation { .. }
+                | PipelineEvent::EdgeConfirmed { .. }
+        ),
+        "evidence" => matches!(
+            event,
+            PipelineEvent::GraphEdgeMutation { .. } | PipelineEvent::EdgeConfirmed { .. }
         ),
         "loop" => matches!(
             event,
@@ -218,6 +225,24 @@ fn print_event(envelope: &EventEnvelope, base_time: DateTime<Utc>) {
             println!();
         }
 
+        PipelineEvent::ForwardChain {
+            rule,
+            premise_a,
+            premise_b,
+            conclusion,
+            confidence,
+        } => {
+            println!(
+                "  [{:>8.3}s] ── \x1b[33mDEDUCED\x1b[0m ── ({})",
+                secs, corr_short
+            );
+            println!("              Rule: {}", rule);
+            println!("              Premise A: {}", premise_a);
+            println!("              Premise B: {}", premise_b);
+            println!("              ∴ {} (conf: {:.2})", conclusion, confidence);
+            println!();
+        }
+
         PipelineEvent::ReviewResult {
             claim,
             provider_scores,
@@ -261,10 +286,28 @@ fn print_event(envelope: &EventEnvelope, base_time: DateTime<Utc>) {
             target_node,
             edge_type,
             confidence,
+            source_tag,
+            provider,
+            ..
+        } => {
+            let src = source_tag.as_deref().unwrap_or("?");
+            let prov = provider.as_deref().unwrap_or("?");
+            println!(
+                "  [{:>8.3}s] ── \x1b[36mGRAPH\x1b[0m ── {:?} edge: {} ──[{}]──▶ {} (conf: {:.2}, {}, {}) ({})",
+                secs, operation, source_node, edge_type, target_node, confidence, src, prov, corr_short
+            );
+        }
+
+        PipelineEvent::EdgeConfirmed {
+            source_node,
+            target_node,
+            edge_type,
+            provider,
+            ..
         } => {
             println!(
-                "  [{:>8.3}s] ── \x1b[36mGRAPH\x1b[0m ── {:?} edge: {} ──[{}]──▶ {} (conf: {:.2}) ({})",
-                secs, operation, source_node, edge_type, target_node, confidence, corr_short
+                "  [{:>8.3}s] ── \x1b[32mCONFIRMED\x1b[0m ── {} ──[{}]──▶ {} (by {}) ({})",
+                secs, source_node, edge_type, target_node, provider, corr_short
             );
         }
 

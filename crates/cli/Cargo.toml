@@ -14,6 +14,7 @@ curriculum = { path = "../curriculum" }
 event-log = { path = "../event-log" }
 extraction = { path = "../extraction" }
 graph-service = { path = "../graph-service" }
+serde_json = "1"
 nsai-loop = { path = "../nsai-loop" }
 llm-client = { path = "../llm-client", features = ["mock"] }
 tokio = { version = "1", features = ["full"] }

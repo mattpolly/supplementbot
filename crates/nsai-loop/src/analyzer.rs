@@ -60,12 +60,12 @@ impl GapKind {
 /// Analyze the graph and return gaps worth filling.
 ///
 /// Skips the ingredient node itself (it's the root, not a gap).
-pub fn find_gaps(graph: &KnowledgeGraph, nutraceutical: &str) -> Vec<Gap> {
+pub async fn find_gaps(graph: &KnowledgeGraph, nutraceutical: &str) -> Vec<Gap> {
     let mut gaps = Vec::new();
     let ingredient_name = nutraceutical.to_lowercase();
 
-    for idx in graph.all_nodes() {
-        let data = match graph.node_data(idx) {
+    for idx in graph.all_nodes().await {
+        let data = match graph.node_data(&idx).await {
             Some(d) => d,
             None => continue,
         };
@@ -75,29 +75,43 @@ pub fn find_gaps(graph: &KnowledgeGraph, nutraceutical: &str) -> Vec<Gap> {
             continue;
         }
 
-        let outgoing = graph.outgoing_edges(idx);
-        let incoming = graph.incoming_edges(idx);
+        let outgoing = graph.outgoing_edges(&idx).await;
+        let incoming = graph.incoming_edges(&idx).await;
 
-        // Leaf node: no outgoing edges and not an Ingredient
+        // Leaf node: no outgoing edges and not an Ingredient.
+        // But System and Property nodes are valid terminals — they're
+        // targets, not sources. Only flag them if they have zero
+        // incoming edges (truly disconnected).
         if outgoing.is_empty() {
-            gaps.push(Gap {
-                node_idx: idx,
-                node_name: data.name.clone(),
-                kind: GapKind::LeafNode,
-            });
+            let is_terminal = match data.node_type {
+                NodeType::System => incoming.iter().any(|(_, e)| e.edge_type == EdgeType::ActsOn),
+                NodeType::Property => incoming.iter().any(|(_, e)| e.edge_type == EdgeType::Affords),
+                _ => false,
+            };
+
+            if !is_terminal {
+                gaps.push(Gap {
+                    node_idx: idx.clone(),
+                    node_name: data.name.clone(),
+                    kind: GapKind::LeafNode,
+                });
+            }
         }
 
         // Property with no incoming edge from a Mechanism node — effect without cause
         if data.node_type == NodeType::Property {
-            let has_mechanism_source = incoming.iter().any(|(src_idx, _)| {
-                graph
-                    .node_data(*src_idx)
-                    .map(|d| d.node_type == NodeType::Mechanism)
-                    .unwrap_or(false)
-            });
+            let mut has_mechanism_source = false;
+            for (src_idx, _) in &incoming {
+                if let Some(d) = graph.node_data(src_idx).await {
+                    if d.node_type == NodeType::Mechanism {
+                        has_mechanism_source = true;
+                        break;
+                    }
+                }
+            }
             if !has_mechanism_source {
                 gaps.push(Gap {
-                    node_idx: idx,
+                    node_idx: idx.clone(),
                     node_name: data.name.clone(),
                     kind: GapKind::NoMechanism,
                 });
@@ -112,61 +126,116 @@ pub fn find_gaps(graph: &KnowledgeGraph, nutraceutical: &str) -> Vec<Gap> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_finds_leaf_nodes() {
-        let mut graph = KnowledgeGraph::new();
-        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient));
-        let prop = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property));
+    #[tokio::test]
+    async fn test_finds_leaf_nodes() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        // Mechanism with no outgoing edges and no terminal-qualifying incoming edges
+        let mech = graph.add_node(NodeData::new("calcium antagonism", NodeType::Mechanism)).await;
         graph.add_edge(
-            mag,
-            prop,
-            EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0)),
-        );
+            &mag,
+            &mech,
+            EdgeData::new(EdgeType::ViaMechanism, EdgeMetadata::extracted(0.7, 1, 0)),
+        ).await;
 
-        let gaps = find_gaps(&graph, "magnesium");
+        let gaps = find_gaps(&graph, "magnesium").await;
 
-        // "muscle relaxation" is a leaf — no outgoing edges
-        assert!(gaps.iter().any(|g| g.node_name == "muscle relaxation"
+        assert!(gaps.iter().any(|g| g.node_name == "calcium antagonism"
             && g.kind == GapKind::LeafNode));
     }
 
-    #[test]
-    fn test_finds_property_without_mechanism() {
-        let mut graph = KnowledgeGraph::new();
-        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient));
-        let prop = graph.add_node(NodeData::new("sleep quality", NodeType::Property));
+    #[tokio::test]
+    async fn test_system_with_acts_on_is_terminal() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        let sys = graph.add_node(NodeData::new("muscular system", NodeType::System)).await;
         graph.add_edge(
-            mag,
-            prop,
-            EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0)),
-        );
+            &mag,
+            &sys,
+            EdgeData::new(EdgeType::ActsOn, EdgeMetadata::extracted(0.7, 1, 0)),
+        ).await;
 
-        let gaps = find_gaps(&graph, "magnesium");
+        let gaps = find_gaps(&graph, "magnesium").await;
+
+        // System with incoming acts_on is a valid terminal — not a gap
+        assert!(
+            !gaps.iter().any(|g| g.node_name == "muscular system" && g.kind == GapKind::LeafNode),
+            "System with acts_on should not be flagged as leaf"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_property_with_affords_is_terminal() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        let prop = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property)).await;
+        graph.add_edge(
+            &mag,
+            &prop,
+            EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0)),
+        ).await;
+
+        let gaps = find_gaps(&graph, "magnesium").await;
+
+        // Property with incoming affords is a valid terminal — not a leaf gap
+        assert!(
+            !gaps.iter().any(|g| g.node_name == "muscle relaxation" && g.kind == GapKind::LeafNode),
+            "Property with affords should not be flagged as leaf"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disconnected_system_is_still_a_gap() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        // System with zero incoming edges — genuinely disconnected
+        graph.add_node(NodeData::new("skeletal system", NodeType::System)).await;
+
+        let gaps = find_gaps(&graph, "magnesium").await;
+
+        assert!(
+            gaps.iter().any(|g| g.node_name == "skeletal system" && g.kind == GapKind::LeafNode),
+            "Disconnected system should still be flagged"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finds_property_without_mechanism() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        let prop = graph.add_node(NodeData::new("sleep quality", NodeType::Property)).await;
+        graph.add_edge(
+            &mag,
+            &prop,
+            EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0)),
+        ).await;
+
+        let gaps = find_gaps(&graph, "magnesium").await;
 
         assert!(gaps
             .iter()
             .any(|g| g.node_name == "sleep quality" && g.kind == GapKind::NoMechanism));
     }
 
-    #[test]
-    fn test_no_gap_when_mechanism_exists() {
-        let mut graph = KnowledgeGraph::new();
-        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient));
-        let mech = graph.add_node(NodeData::new("calcium antagonism", NodeType::Mechanism));
-        let prop = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property));
+    #[tokio::test]
+    async fn test_no_gap_when_mechanism_exists() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        let mech = graph.add_node(NodeData::new("calcium antagonism", NodeType::Mechanism)).await;
+        let prop = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property)).await;
 
         graph.add_edge(
-            mag,
-            mech,
+            &mag,
+            &mech,
             EdgeData::new(EdgeType::ViaMechanism, EdgeMetadata::extracted(0.7, 1, 0)),
-        );
+        ).await;
         graph.add_edge(
-            mech,
-            prop,
+            &mech,
+            &prop,
             EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0)),
-        );
+        ).await;
 
-        let gaps = find_gaps(&graph, "magnesium");
+        let gaps = find_gaps(&graph, "magnesium").await;
 
         // "muscle relaxation" has an incoming edge from a Mechanism node, so no NoMechanism gap
         let no_mech_gaps: Vec<_> = gaps
@@ -176,12 +245,12 @@ mod tests {
         assert!(no_mech_gaps.is_empty(), "should not flag NoMechanism when a Mechanism feeds into it");
     }
 
-    #[test]
-    fn test_skips_ingredient_node() {
-        let mut graph = KnowledgeGraph::new();
-        graph.add_node(NodeData::new("magnesium", NodeType::Ingredient));
+    #[tokio::test]
+    async fn test_skips_ingredient_node() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
 
-        let gaps = find_gaps(&graph, "magnesium");
+        let gaps = find_gaps(&graph, "magnesium").await;
 
         // Ingredient itself should never show up as a gap
         assert!(gaps.iter().all(|g| g.node_name != "magnesium"));

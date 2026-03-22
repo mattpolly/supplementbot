@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use surrealdb_types::SurrealValue;
 
 // ---------------------------------------------------------------------------
 // Confidence — type alias now, struct later when multi-LLM scoring arrives
@@ -21,7 +22,7 @@ pub type Complexity = f64;
 // ---------------------------------------------------------------------------
 // Node types — the nouns of the ontology
 // ---------------------------------------------------------------------------
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, SurrealValue)]
 #[serde(tag = "kind")]
 pub enum NodeType {
     /// A supplement or nutraceutical (e.g. "Magnesium")
@@ -68,7 +69,7 @@ impl NodeType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, SurrealValue)]
 pub struct NodeData {
     /// Canonical name — the unique human-readable identifier (e.g. "Magnesium", "Nervous System")
     pub name: String,
@@ -97,7 +98,7 @@ impl fmt::Display for NodeData {
 // Organized by complexity threshold. Foundational types (0.0) are visible
 // at all levels. Advanced regulatory forces require higher complexity.
 // ---------------------------------------------------------------------------
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, SurrealValue)]
 pub enum EdgeType {
     // ── Foundational (0.0) — visible at all levels ──────────────────────
     /// Ingredient acts on a System
@@ -259,17 +260,19 @@ impl fmt::Display for EdgeType {
 // ---------------------------------------------------------------------------
 
 /// Where this edge's data came from
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SurrealValue)]
 pub enum Source {
     /// Directly extracted from an LLM response
     Extracted,
     /// Inferred from graph topology (speculative inference engine)
     StructurallyEmergent,
+    /// Deduced by symbolic forward chaining (guaranteed given premises)
+    Deduced,
 }
 
 /// Flexible metadata value for dimension-specific data that doesn't exist yet.
 /// New dimensions (dosage, delivery method, etc.) go here without schema changes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
 #[serde(untagged)]
 pub enum MetadataValue {
     String(String),
@@ -279,14 +282,14 @@ pub enum MetadataValue {
 }
 
 /// LLM agreement record — which providers weighed in and what they said
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
 pub struct LlmAgreement {
     /// Provider name → confidence score from that provider
     pub scores: HashMap<String, Confidence>,
 }
 
 /// Everything we know about an edge beyond its type
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
 pub struct EdgeMetadata {
     /// Overall confidence in this relationship (0.0–1.0)
     pub confidence: Confidence,
@@ -328,12 +331,24 @@ impl EdgeMetadata {
             extra: HashMap::new(),
         }
     }
+
+    /// Create metadata for a deduced edge (symbolic forward chaining)
+    pub fn deduced(confidence: Confidence, iteration: u32, epoch: u32) -> Self {
+        Self {
+            confidence,
+            source: Source::Deduced,
+            iteration,
+            epoch,
+            llm_agreement: None,
+            extra: HashMap::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // EdgeData — the full edge payload stored in petgraph
 // ---------------------------------------------------------------------------
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
 pub struct EdgeData {
     /// The relationship type
     pub edge_type: EdgeType,

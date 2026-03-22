@@ -13,8 +13,11 @@ Supplementbot uses an iterative **NSAI loop** to teach a knowledge graph about s
 3. **Analyze gaps** — Inspect the graph for missing connections (leaf nodes, missing mechanisms)
 4. **Fill gaps** — Ask targeted follow-up questions and extract the answers
 5. **Comprehension check** — Have the LLM rephrase its understanding; re-extract and compare for consistency
+6. **Structural inference** — Analyze the graph topology for cross-ingredient patterns (shared systems, mechanisms, convergent paths)
 
-The graph grows denser each iteration. A **complexity lens** (continuous 0.0–1.0 dial) controls which ontology types are visible at each grade level, preventing advanced biochemistry from leaking into simple explanations.
+The graph grows denser each iteration and **persists across runs** in a SurrealDB embedded database. Add one nutraceutical today, another tomorrow — the graph keeps growing and cross-ingredient observations get richer.
+
+A **complexity lens** (continuous 0.0–1.0 dial) controls which ontology types are visible at each grade level, preventing advanced biochemistry from leaking into simple explanations.
 
 ## Project Structure
 
@@ -25,10 +28,10 @@ supplementbot/
 │   ├── curriculum/       # Question generation by grade level
 │   ├── event-log/        # Structured JSONL observability
 │   ├── extraction/       # LLM response → typed graph triples
-│   ├── graph-service/    # Knowledge graph (petgraph) + ontology types + complexity lens
+│   ├── graph-service/    # Knowledge graph (SurrealDB) + ontology types + complexity lens
 │   ├── llm-client/       # Provider-agnostic LLM trait (Anthropic, Gemini, mock)
 │   ├── log-viewer/       # Terminal viewer for event logs
-│   └── nsai-loop/        # Loop orchestrator (gap analysis, filling, comprehension)
+│   └── nsai-loop/        # Loop orchestrator (gap analysis, filling, comprehension, structural inference)
 └── Cargo.toml            # Workspace root
 ```
 
@@ -37,6 +40,7 @@ supplementbot/
 ### Prerequisites
 
 - Rust (stable toolchain)
+- `libclang-dev` (for SurrealDB's RocksDB backend: `sudo apt install libclang-dev`)
 - An API key for at least one LLM provider
 
 ### Build
@@ -45,32 +49,46 @@ supplementbot/
 cargo build --release
 ```
 
+First build takes several minutes due to SurrealDB compilation. Subsequent builds are fast.
+
 ### Run Tests
 
 ```bash
 cargo test
 ```
 
-67 tests across 8 crates covering graph operations, extraction parsing, lens enforcement, gap analysis, comprehension checks, and the full NSAI loop.
-
 ### Run the CLI
 
 ```bash
 # With the mock provider (no API key needed)
-cargo run --bin cli -- --nutraceutical "Magnesium"
+cargo run --bin supplementbot -- --nutraceutical "Magnesium"
 
 # With Anthropic Claude
-ANTHROPIC_API_KEY=sk-... cargo run --bin cli --features anthropic -- --nutraceutical "Magnesium"
+cargo run --bin supplementbot -- --nutraceutical "Magnesium" --provider anthropic
 
 # With Google Gemini
-GEMINI_API_KEY=... cargo run --bin cli --features gemini -- --nutraceutical "Magnesium"
+cargo run --bin supplementbot -- --nutraceutical "Magnesium" --provider gemini
+
+# Multiple nutraceuticals in one run
+cargo run --bin supplementbot -- --nutraceutical "Magnesium,Zinc" --provider anthropic
+
+# Add nutraceuticals over time (graph persists between runs)
+cargo run --bin supplementbot -- -n Magnesium -p anthropic
+cargo run --bin supplementbot -- -n Zinc -p anthropic
+# Second run loads existing graph, adds Zinc, shows cross-ingredient observations
 ```
+
+API keys are read from environment variables (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) or a `.env` file.
 
 #### CLI Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--nutraceutical` | `"Magnesium"` | Supplement to analyze |
+| `-n, --nutraceutical` | — | Supplement(s) to analyze (comma-separated) |
+| `-p, --provider` | `mock` | LLM provider: `anthropic`, `gemini`, or `mock` |
+| `-m, --model` | provider default | Model name override |
+| `-g, --graph-db` | `~/.supplementbot/graph` | Path to persistent graph database |
+| `-o, --output` | `events.jsonl` | Event log output file |
 | `--max-iterations` | `3` | Max gap-filling iterations |
 | `--max-gaps` | `5` | Max gaps to fill per iteration |
 
@@ -98,6 +116,8 @@ Magnesium, Zinc, Vitamin D, Omega-3 fatty acids, B-complex vitamins, Vitamin C, 
 ## What This Demonstrates
 
 - **Neurosymbolic AI** — combining neural (LLM) and symbolic (graph) reasoning
+- **Persistent knowledge graph** — SurrealDB embedded database grows across runs
+- **Structural inference** — graph discovers cross-ingredient patterns without LLM involvement
 - **Affordance-based modeling** — "magnesium affords muscle relaxation" rather than rigid lookups
 - **Ontology complexity gating** — continuous dial prevents grade-inappropriate concepts from leaking
 - **Self-consistency checking** — rephrase test validates understanding before escalating

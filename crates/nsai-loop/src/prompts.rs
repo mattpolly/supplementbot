@@ -82,18 +82,113 @@ pub fn comprehension_system_prompt() -> &'static str {
      - Do not discuss diseases or diagnoses."
 }
 
+// ---------------------------------------------------------------------------
+// Speculative inference prompts
+//
+// Given a structural observation (a pattern found in graph topology),
+// ask the LLM to validate whether the pattern has real-world significance.
+// ---------------------------------------------------------------------------
+
+/// System prompt for speculative inference validation
+pub fn speculative_system_prompt() -> &'static str {
+    "You are a nutraceutical knowledge extraction assistant.\n\
+     \n\
+     Rules:\n\
+     - Answer in exactly ONE sentence. Be concise but specific.\n\
+     - You are validating whether a relationship between supplements might exist.\n\
+     - If the relationship is not well-established, say so briefly.\n\
+     - Do not discuss diseases or diagnoses. Frame everything in terms of \
+       symptoms and physiological function.\n\
+     - Do not speculate beyond well-established knowledge.\n\
+     - Match your vocabulary to the audience level specified in the question.\n\
+     - Be direct."
+}
+
+/// Generate a validation question for a structural observation at 5th grade level.
+pub fn speculative_question(observation: &crate::structural::Observation) -> String {
+    use crate::structural::ObservationKind;
+
+    let audience = "a 5th grader (10 years old), using simple everyday words";
+
+    match &observation.kind {
+        ObservationKind::SharedSystem => {
+            format!(
+                "Explain to {} whether taking {} together does anything \
+                 special for the body, in one sentence.",
+                audience,
+                format_involved_ingredients(&observation.involved),
+            )
+        }
+        ObservationKind::SharedProperty => {
+            format!(
+                "Explain to {} whether {} help with the same thing \
+                 in the same way or in different ways, in one sentence.",
+                audience,
+                format_involved_ingredients(&observation.involved),
+            )
+        }
+        ObservationKind::SharedMechanism => {
+            format!(
+                "Explain to {} whether {} help each other or get in \
+                 each other's way when they work in the body, in one sentence.",
+                audience,
+                format_involved_ingredients(&observation.involved),
+            )
+        }
+        ObservationKind::ConvergentPaths => {
+            // For convergent paths, the involved nodes are [ingredient, property, mechanism]
+            let ing = observation.involved.get(0).map(|s| s.as_str()).unwrap_or("this supplement");
+            let prop = observation.involved.get(1).map(|s| s.as_str()).unwrap_or("this effect");
+            format!(
+                "Explain to {} why it matters that {} helps with {} \
+                 in more than one way, in one sentence.",
+                audience, ing, prop,
+            )
+        }
+        ObservationKind::MechanismOverlap => {
+            format!(
+                "Explain to {} whether {} work on the body through \
+                 the same process and what that means, in one sentence.",
+                audience,
+                format_involved_ingredients(&observation.involved),
+            )
+        }
+    }
+}
+
+/// Extract ingredient names from the involved list (ingredients are the items
+/// that aren't systems, properties, or mechanisms — heuristic: they come first)
+fn format_involved_ingredients(involved: &[String]) -> String {
+    // In structural observations, ingredients are listed first, then the shared node last
+    let ingredients: Vec<&str> = if involved.len() > 1 {
+        involved[..involved.len() - 1].iter().map(|s| s.as_str()).collect()
+    } else {
+        involved.iter().map(|s| s.as_str()).collect()
+    };
+
+    match ingredients.len() {
+        0 => "these supplements".to_string(),
+        1 => ingredients[0].to_string(),
+        2 => format!("{} and {}", ingredients[0], ingredients[1]),
+        _ => {
+            let (last, rest) = ingredients.split_last().unwrap();
+            format!("{}, and {}", rest.join(", "), last)
+        }
+    }
+}
+
 /// Build a plain-English summary of the current graph for the comprehension prompt.
 /// e.g. "Magnesium helps with muscle relaxation. Magnesium works on the muscular system."
-pub fn summarize_graph_for_comprehension(
+pub async fn summarize_graph_for_comprehension(
     graph: &graph_service::graph::KnowledgeGraph,
     nutraceutical: &str,
 ) -> String {
     let ingredient_name = nutraceutical.to_lowercase();
     let mut sentences = Vec::new();
 
-    if let Some(idx) = graph.find_node(&ingredient_name) {
-        for (target_idx, edge_data) in graph.outgoing_edges(idx) {
-            if let Some(target) = graph.node_data(target_idx) {
+    if let Some(idx) = graph.find_node(&ingredient_name).await {
+        for (target_idx, edge_data) in graph.outgoing_edges(&idx).await {
+            if let Some(target) = graph.node_data(&target_idx).await {
                 let sentence = match &edge_data.edge_type {
                     graph_service::types::EdgeType::Affords => {
                         format!("{} helps with {}.", nutraceutical, target.name)
@@ -121,15 +216,14 @@ pub fn summarize_graph_for_comprehension(
 mod tests {
     use super::*;
     use crate::analyzer::{Gap, GapKind};
-    use graph_service::graph::KnowledgeGraph;
+    use graph_service::graph::{KnowledgeGraph, NodeIndex};
     use graph_service::types::*;
 
     #[test]
     fn test_gap_question_leaf_node() {
-        let mut graph = KnowledgeGraph::new();
-        let idx = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property));
+        // We don't need a real graph for the gap question — just a Gap struct
         let gap = Gap {
-            node_idx: idx,
+            node_idx: NodeIndex::default_for_test(),
             node_name: "muscle relaxation".to_string(),
             kind: GapKind::LeafNode,
         };
@@ -142,10 +236,8 @@ mod tests {
 
     #[test]
     fn test_gap_question_no_mechanism() {
-        let mut graph = KnowledgeGraph::new();
-        let idx = graph.add_node(NodeData::new("sleep quality", NodeType::Property));
         let gap = Gap {
-            node_idx: idx,
+            node_idx: NodeIndex::default_for_test(),
             node_name: "sleep quality".to_string(),
             kind: GapKind::NoMechanism,
         };
@@ -155,25 +247,25 @@ mod tests {
         assert!(q.contains("sleep quality"));
     }
 
-    #[test]
-    fn test_summarize_graph() {
-        let mut graph = KnowledgeGraph::new();
-        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient));
-        let prop = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property));
-        let sys = graph.add_node(NodeData::new("muscular system", NodeType::System));
+    #[tokio::test]
+    async fn test_summarize_graph() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        let prop = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property)).await;
+        let sys = graph.add_node(NodeData::new("muscular system", NodeType::System)).await;
 
         graph.add_edge(
-            mag,
-            prop,
+            &mag,
+            &prop,
             EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0)),
-        );
+        ).await;
         graph.add_edge(
-            mag,
-            sys,
+            &mag,
+            &sys,
             EdgeData::new(EdgeType::ActsOn, EdgeMetadata::extracted(0.7, 1, 0)),
-        );
+        ).await;
 
-        let summary = summarize_graph_for_comprehension(&graph, "Magnesium");
+        let summary = summarize_graph_for_comprehension(&graph, "Magnesium").await;
         assert!(summary.contains("Magnesium helps with muscle relaxation"));
         assert!(summary.contains("Magnesium works on the muscular system"));
     }

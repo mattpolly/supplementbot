@@ -5,12 +5,16 @@ use event_log::sink::EventSink;
 use extraction::parser::ExtractionParser;
 use graph_service::graph::KnowledgeGraph;
 use graph_service::lens::ComplexityLens;
+use graph_service::source::SourceStore;
+use graph_service::types::Source;
 use llm_client::provider::{CompletionRequest, LlmProvider};
 use uuid::Uuid;
 
 use crate::analyzer;
 use crate::comprehension;
+use crate::forward_chain;
 use crate::prompts;
+use crate::speculative;
 
 // ---------------------------------------------------------------------------
 // Loop configuration
@@ -22,6 +26,8 @@ pub struct LoopConfig {
     pub max_gap_iterations: u32,
     /// Max gaps to fill per iteration (prevents runaway)
     pub max_gaps_per_iteration: usize,
+    /// Max structural observations to validate with the LLM (0 = skip speculative)
+    pub max_speculative_observations: usize,
 }
 
 impl Default for LoopConfig {
@@ -29,6 +35,7 @@ impl Default for LoopConfig {
         Self {
             max_gap_iterations: 3,
             max_gaps_per_iteration: 5,
+            max_speculative_observations: 3,
         }
     }
 }
@@ -42,8 +49,12 @@ impl Default for LoopConfig {
 pub struct LoopResult {
     pub iterations: u32,
     pub total_gaps_filled: usize,
+    pub deduced_chains: usize,
+    pub deduced_edges_added: usize,
     pub comprehension_edges_confirmed: usize,
     pub comprehension_edges_new: usize,
+    pub speculative_observations: usize,
+    pub speculative_edges_added: usize,
     pub final_node_count: usize,
     pub final_edge_count: usize,
 }
@@ -57,6 +68,7 @@ pub struct NsaiLoop<'a> {
     sink: &'a dyn EventSink,
     config: LoopConfig,
     lens: ComplexityLens,
+    source_store: Option<&'a SourceStore>,
 }
 
 impl<'a> NsaiLoop<'a> {
@@ -66,6 +78,7 @@ impl<'a> NsaiLoop<'a> {
             sink,
             config: LoopConfig::default(),
             lens: ComplexityLens::default(),
+            source_store: None,
         }
     }
 
@@ -79,6 +92,11 @@ impl<'a> NsaiLoop<'a> {
         self
     }
 
+    pub fn with_source_store(mut self, store: &'a SourceStore) -> Self {
+        self.source_store = Some(store);
+        self
+    }
+
     /// Run the full NSAI loop for a nutraceutical at 5th grade level.
     ///
     /// 1. Seed question → extract into graph
@@ -87,11 +105,14 @@ impl<'a> NsaiLoop<'a> {
     pub async fn run(
         &self,
         nutraceutical: &str,
-        graph: &mut KnowledgeGraph,
+        graph: &KnowledgeGraph,
         correlation_id: Uuid,
     ) -> LoopResult {
-        let parser = ExtractionParser::new(self.provider, self.sink, 1, 0)
+        let mut parser = ExtractionParser::new(self.provider, self.sink, 1, 0)
             .with_lens(self.lens);
+        if let Some(store) = self.source_store {
+            parser = parser.with_source_store(store);
+        }
         let mut total_gaps_filled = 0usize;
         let mut iteration = 0u32;
 
@@ -99,8 +120,8 @@ impl<'a> NsaiLoop<'a> {
         let seed_answer = self.ask_seed(nutraceutical, correlation_id).await;
 
         if let Some(answer) = seed_answer {
-            let nodes_before = graph.node_count();
-            let edges_before = graph.edge_count();
+            let nodes_before = graph.node_count().await;
+            let edges_before = graph.edge_count().await;
 
             parser
                 .extract_sentence(
@@ -119,9 +140,9 @@ impl<'a> NsaiLoop<'a> {
                     phase: "seed".to_string(),
                     gaps_found: 0,
                     nodes_before,
-                    nodes_after: graph.node_count(),
+                    nodes_after: graph.node_count().await,
                     edges_before,
-                    edges_after: graph.edge_count(),
+                    edges_after: graph.edge_count().await,
                 },
             );
         }
@@ -130,7 +151,7 @@ impl<'a> NsaiLoop<'a> {
         for i in 1..=self.config.max_gap_iterations {
             iteration = i;
 
-            let gaps = analyzer::find_gaps(graph, nutraceutical);
+            let gaps = analyzer::find_gaps(graph, nutraceutical).await;
             if gaps.is_empty() {
                 break;
             }
@@ -147,13 +168,13 @@ impl<'a> NsaiLoop<'a> {
                             description: g.kind.description(&g.node_name),
                         })
                         .collect(),
-                    graph_nodes: graph.node_count(),
-                    graph_edges: graph.edge_count(),
+                    graph_nodes: graph.node_count().await,
+                    graph_edges: graph.edge_count().await,
                 },
             );
 
-            let nodes_before = graph.node_count();
-            let edges_before = graph.edge_count();
+            let nodes_before = graph.node_count().await;
+            let edges_before = graph.edge_count().await;
             let gaps_this_round = gaps.len().min(self.config.max_gaps_per_iteration);
 
             for gap in gaps.iter().take(self.config.max_gaps_per_iteration) {
@@ -215,6 +236,9 @@ impl<'a> NsaiLoop<'a> {
 
             total_gaps_filled += gaps_this_round;
 
+            let nodes_after = graph.node_count().await;
+            let edges_after = graph.edge_count().await;
+
             self.sink.emit(
                 correlation_id,
                 PipelineEvent::LoopIteration {
@@ -222,19 +246,27 @@ impl<'a> NsaiLoop<'a> {
                     phase: "gap_fill".to_string(),
                     gaps_found: gaps.len(),
                     nodes_before,
-                    nodes_after: graph.node_count(),
+                    nodes_after,
                     edges_before,
-                    edges_after: graph.edge_count(),
+                    edges_after,
                 },
             );
 
             // If nothing changed, stop early
-            if graph.node_count() == nodes_before && graph.edge_count() == edges_before {
+            if nodes_after == nodes_before && edges_after == edges_before {
                 break;
             }
         }
 
-        // ── Step 3: Comprehension check ────────────────────────────────────
+        // ── Step 3: Forward chaining (symbolic deduction) ─────────────────
+        let chain_result = forward_chain::run_forward_chaining(
+            self.sink,
+            graph,
+            correlation_id,
+        )
+        .await;
+
+        // ── Step 4: Comprehension check ────────────────────────────────────
         let comp = comprehension::check_comprehension(
             self.provider,
             self.sink,
@@ -251,20 +283,51 @@ impl<'a> NsaiLoop<'a> {
                 iteration: iteration + 1,
                 phase: "comprehension".to_string(),
                 gaps_found: 0,
-                nodes_before: graph.node_count(),
-                nodes_after: graph.node_count(),
+                nodes_before: graph.node_count().await,
+                nodes_after: graph.node_count().await,
                 edges_before: comp.edges_total.saturating_sub(comp.edges_new),
                 edges_after: comp.edges_total,
             },
         );
 
+        // ── Step 4: Speculative inference ────────────────────────────────
+        let mut speculative_observations = 0;
+        let mut speculative_edges_added = 0;
+
+        if self.config.max_speculative_observations > 0 {
+            let mut spec_parser = ExtractionParser::new(self.provider, self.sink, 1, 0)
+                .with_lens(self.lens)
+                .with_source(Source::StructurallyEmergent)
+                .with_confidence(0.5);
+            if let Some(store) = self.source_store {
+                spec_parser = spec_parser.with_source_store(store);
+            }
+
+            let spec = speculative::run_speculative_inference(
+                self.provider,
+                self.sink,
+                &spec_parser,
+                graph,
+                self.config.max_speculative_observations,
+                correlation_id,
+            )
+            .await;
+
+            speculative_observations = spec.observations_found;
+            speculative_edges_added = spec.edges_added;
+        }
+
         LoopResult {
             iterations: iteration,
             total_gaps_filled,
+            deduced_chains: chain_result.chains_found,
+            deduced_edges_added: chain_result.edges_added,
             comprehension_edges_confirmed: comp.edges_confirmed,
             comprehension_edges_new: comp.edges_new,
-            final_node_count: graph.node_count(),
-            final_edge_count: graph.edge_count(),
+            speculative_observations,
+            speculative_edges_added,
+            final_node_count: graph.node_count().await,
+            final_edge_count: graph.edge_count().await,
         }
     }
 
@@ -390,14 +453,14 @@ mod tests {
         let provider = loop_mock();
         let sink = MemorySink::new();
         let nsai = NsaiLoop::new(&provider, &sink);
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
-        let result = nsai.run("Magnesium", &mut graph, corr_id).await;
+        let result = nsai.run("Magnesium", &graph, corr_id).await;
 
         // Should have created nodes
-        assert!(graph.node_count() > 0, "graph should have nodes");
-        assert!(graph.edge_count() > 0, "graph should have edges");
+        assert!(graph.node_count().await > 0, "graph should have nodes");
+        assert!(graph.edge_count().await > 0, "graph should have edges");
         // Should have done at least 1 gap-filling iteration
         assert!(result.iterations >= 1);
     }
@@ -407,10 +470,10 @@ mod tests {
         let provider = loop_mock();
         let sink = MemorySink::new();
         let nsai = NsaiLoop::new(&provider, &sink);
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
-        nsai.run("Magnesium", &mut graph, corr_id).await;
+        nsai.run("Magnesium", &graph, corr_id).await;
 
         let events = sink.events_for(corr_id);
 
@@ -436,12 +499,13 @@ mod tests {
         let config = LoopConfig {
             max_gap_iterations: 1,
             max_gaps_per_iteration: 2,
+            max_speculative_observations: 0,
         };
         let nsai = NsaiLoop::new(&provider, &sink).with_config(config);
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
-        let result = nsai.run("Magnesium", &mut graph, corr_id).await;
+        let result = nsai.run("Magnesium", &graph, corr_id).await;
 
         // With max 1 iteration, should stop after first gap-fill round
         assert!(result.iterations <= 1);

@@ -120,6 +120,17 @@ pub enum PipelineEvent {
         source_nodes: Vec<String>,
     },
 
+    // -- Forward chaining (symbolic deduction) ------------------------------
+
+    /// A deduction produced by symbolic forward chaining
+    ForwardChain {
+        rule: String,
+        premise_a: String,
+        premise_b: String,
+        conclusion: String,
+        confidence: f64,
+    },
+
     // -- Review pipeline (Phase 5) ----------------------------------------
 
     /// Result of multi-LLM review of a speculative claim
@@ -146,6 +157,26 @@ pub enum PipelineEvent {
         target_node: String,
         edge_type: String,
         confidence: f64,
+        /// How this edge was produced (Extracted, StructurallyEmergent, Deduced)
+        #[serde(default)]
+        source_tag: Option<String>,
+        /// Which provider produced this edge
+        #[serde(default)]
+        provider: Option<String>,
+        /// Which model produced this edge
+        #[serde(default)]
+        model: Option<String>,
+    },
+
+    /// An existing edge was independently re-observed (confirmation signal)
+    EdgeConfirmed {
+        source_node: String,
+        target_node: String,
+        edge_type: String,
+        /// Which provider confirmed this edge
+        provider: String,
+        /// Which model confirmed this edge
+        model: String,
     },
 }
 

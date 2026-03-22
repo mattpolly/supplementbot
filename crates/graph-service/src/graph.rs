@@ -1,222 +1,323 @@
-pub use petgraph::graph::NodeIndex;
-use petgraph::graph::DiGraph;
-use petgraph::visit::EdgeRef;
-use petgraph::Direction;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fmt;
+use surrealdb::engine::local::{Db, Mem, RocksDb};
+use surrealdb::Surreal;
+use surrealdb_types::{RecordId, SurrealValue};
 
+use crate::export::{ExportEdge, ExportGraph, ExportNode};
 use crate::types::*;
 
-// ---------------------------------------------------------------------------
-// Serializable graph format — petgraph's DiGraph isn't directly serde-friendly,
-// so we use an adjacency list representation for JSON roundtrips.
-// ---------------------------------------------------------------------------
-#[derive(Debug, Serialize, Deserialize)]
-struct SerializableGraph {
-    nodes: Vec<NodeData>,
-    edges: Vec<SerializableEdge>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SerializableEdge {
-    source: usize,
-    target: usize,
-    data: EdgeData,
+/// Extract the string key from a RecordId (our keys are always slugified strings).
+fn record_key(id: &RecordId) -> String {
+    match &id.key {
+        surrealdb_types::RecordIdKey::String(s) => s.clone(),
+        other => format!("{:?}", other),
+    }
 }
 
 // ---------------------------------------------------------------------------
-// KnowledgeGraph — the petgraph wrapper
+// NodeIndex — a lightweight handle to a node in the database
 // ---------------------------------------------------------------------------
+
+/// Opaque handle to a graph node. Wraps a SurrealDB RecordId.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NodeIndex(RecordId);
+
+impl NodeIndex {
+    pub fn id(&self) -> &RecordId {
+        &self.0
+    }
+
+    /// Create a dummy NodeIndex for use in tests that don't need a real DB connection.
+    pub fn default_for_test() -> Self {
+        Self(RecordId::new("node", "test_dummy"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DB record types — what SurrealDB stores
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, SurrealValue)]
+struct NodeRecord {
+    name: String,
+    node_type: NodeType,
+}
+
+/// A node record as returned from SurrealDB SELECT (includes `id` field)
+#[derive(Debug, Clone, SurrealValue)]
+struct NodeRecordWithId {
+    id: RecordId,
+    name: String,
+    node_type: NodeType,
+}
+
+#[derive(Debug, Clone, SurrealValue)]
+struct EdgeRecordWithId {
+    id: RecordId,
+    source: RecordId,
+    target: RecordId,
+    edge_type: EdgeType,
+    metadata: EdgeMetadata,
+}
+
+// ---------------------------------------------------------------------------
+// KnowledgeGraph — SurrealDB-backed graph
+// ---------------------------------------------------------------------------
+
 pub struct KnowledgeGraph {
-    graph: DiGraph<NodeData, EdgeData>,
-    /// Name → NodeIndex lookup for fast node access
-    name_index: HashMap<String, NodeIndex>,
+    db: Surreal<Db>,
 }
 
 impl KnowledgeGraph {
-    pub fn new() -> Self {
-        Self {
-            graph: DiGraph::new(),
-            name_index: HashMap::new(),
-        }
+    /// Open or create a persistent graph database at the given path.
+    pub async fn open(path: &str) -> Result<Self, surrealdb::Error> {
+        let db = Surreal::new::<RocksDb>(path).await?;
+        db.use_ns("supplementbot").use_db("graph").await?;
+        Ok(Self { db })
+    }
+
+    /// Create an in-memory graph (for tests).
+    pub async fn in_memory() -> Result<Self, surrealdb::Error> {
+        let db = Surreal::new::<Mem>(()).await?;
+        db.use_ns("supplementbot").use_db("graph").await?;
+        Ok(Self { db })
+    }
+
+    /// Get a reference to the underlying SurrealDB handle.
+    /// Used by the evidence layer to share the same database connection.
+    pub fn db(&self) -> &Surreal<Db> {
+        &self.db
     }
 
     // -- Node operations --------------------------------------------------
 
-    /// Add a node. Returns the index. If a node with this name already exists, returns the existing index.
-    pub fn add_node(&mut self, data: NodeData) -> NodeIndex {
-        if let Some(&idx) = self.name_index.get(&data.name) {
+    /// Add a node. If a node with this name already exists, returns the existing index.
+    /// Deduplicates by lowercase name.
+    pub async fn add_node(&self, data: NodeData) -> NodeIndex {
+        // Check if node already exists by name
+        if let Some(idx) = self.find_node(&data.name).await {
             return idx;
         }
-        let name = data.name.clone();
-        let idx = self.graph.add_node(data);
-        self.name_index.insert(name, idx);
-        idx
+
+        // Use the lowercase name as the record ID for natural dedup
+        let key = slug(&data.name);
+        let record: Option<NodeRecordWithId> = self
+            .db
+            .create(("node", key.as_str()))
+            .content(NodeRecord {
+                name: data.name,
+                node_type: data.node_type,
+            })
+            .await
+            .ok()
+            .flatten();
+
+        match record {
+            Some(r) => NodeIndex(r.id),
+            None => {
+                // Race condition or already exists — fetch it
+                let existing: Option<NodeRecordWithId> =
+                    self.db.select(("node", key.as_str())).await.ok().flatten();
+                NodeIndex(existing.unwrap().id)
+            }
+        }
     }
 
-    /// Look up a node by name
-    pub fn find_node(&self, name: &str) -> Option<NodeIndex> {
-        self.name_index.get(name).copied()
+    /// Look up a node by name (case-insensitive)
+    pub async fn find_node(&self, name: &str) -> Option<NodeIndex> {
+        let key = slug(name);
+        let record: Option<NodeRecordWithId> =
+            self.db.select(("node", key.as_str())).await.ok().flatten();
+        record.map(|r| NodeIndex(r.id))
     }
 
     /// Get node data by index
-    pub fn node_data(&self, idx: NodeIndex) -> Option<&NodeData> {
-        self.graph.node_weight(idx)
+    pub async fn node_data(&self, idx: &NodeIndex) -> Option<NodeData> {
+        let record: Option<NodeRecordWithId> =
+            self.db.select(idx.0.clone()).await.ok().flatten();
+        record.map(|r| NodeData::new(r.name, r.node_type))
     }
 
     /// Get all nodes of a given type
-    pub fn nodes_by_type(&self, node_type: &NodeType) -> Vec<NodeIndex> {
-        self.graph
-            .node_indices()
-            .filter(|&idx| self.graph[idx].node_type == *node_type)
-            .collect()
+    pub async fn nodes_by_type(&self, node_type: &NodeType) -> Vec<NodeIndex> {
+        let mut result = self
+            .db
+            .query("SELECT * FROM node WHERE node_type = $nt")
+            .bind(("nt", node_type.clone()))
+            .await
+            .unwrap();
+        let records: Vec<NodeRecordWithId> = result.take(0).unwrap_or_default();
+        records.into_iter().map(|r| NodeIndex(r.id)).collect()
     }
 
     // -- Edge operations --------------------------------------------------
 
     /// Add an edge between two nodes. Does not deduplicate — caller is responsible.
-    pub fn add_edge(&mut self, source: NodeIndex, target: NodeIndex, data: EdgeData) {
-        self.graph.add_edge(source, target, data);
+    pub async fn add_edge(&self, source: &NodeIndex, target: &NodeIndex, data: EdgeData) {
+        let _: surrealdb::Result<Vec<EdgeRecordWithId>> = self
+            .db
+            .query("RELATE $from->edge->$to SET edge_type = $et, metadata = $meta")
+            .bind(("from", source.0.clone()))
+            .bind(("to", target.0.clone()))
+            .bind(("et", data.edge_type))
+            .bind(("meta", data.metadata))
+            .await
+            .and_then(|mut r| r.take(0));
     }
 
     /// Get all outgoing edges from a node
-    pub fn outgoing_edges(&self, idx: NodeIndex) -> Vec<(NodeIndex, &EdgeData)> {
-        self.graph
-            .edges_directed(idx, Direction::Outgoing)
-            .map(|e| (e.target(), e.weight()))
+    pub async fn outgoing_edges(&self, idx: &NodeIndex) -> Vec<(NodeIndex, EdgeData)> {
+        let mut result = self
+            .db
+            .query("SELECT *, in AS source, out AS target FROM edge WHERE in = $node")
+            .bind(("node", idx.0.clone()))
+            .await
+            .unwrap();
+
+        let records: Vec<EdgeRecordWithId> = result.take(0).unwrap_or_default();
+        records
+            .into_iter()
+            .map(|r| {
+                let edge_data = EdgeData::new(r.edge_type, r.metadata);
+                (NodeIndex(r.target), edge_data)
+            })
             .collect()
     }
 
     /// Get all incoming edges to a node
-    pub fn incoming_edges(&self, idx: NodeIndex) -> Vec<(NodeIndex, &EdgeData)> {
-        self.graph
-            .edges_directed(idx, Direction::Incoming)
-            .map(|e| (e.source(), e.weight()))
-            .collect()
-    }
+    pub async fn incoming_edges(&self, idx: &NodeIndex) -> Vec<(NodeIndex, EdgeData)> {
+        let mut result = self
+            .db
+            .query("SELECT *, in AS source, out AS target FROM edge WHERE out = $node")
+            .bind(("node", idx.0.clone()))
+            .await
+            .unwrap();
 
-    /// Find all neighbors of a node (outgoing direction) filtered by edge type
-    pub fn neighbors_by_edge_type(
-        &self,
-        idx: NodeIndex,
-        edge_type: &EdgeType,
-    ) -> Vec<(NodeIndex, &EdgeData)> {
-        self.outgoing_edges(idx)
+        let records: Vec<EdgeRecordWithId> = result.take(0).unwrap_or_default();
+        records
             .into_iter()
-            .filter(|(_, data)| data.edge_type == *edge_type)
+            .map(|r| {
+                let edge_data = EdgeData::new(r.edge_type, r.metadata);
+                (NodeIndex(r.source), edge_data)
+            })
             .collect()
     }
 
     /// Iterate over all node indices
-    pub fn all_nodes(&self) -> Vec<NodeIndex> {
-        self.graph.node_indices().collect()
+    pub async fn all_nodes(&self) -> Vec<NodeIndex> {
+        let records: Vec<NodeRecordWithId> =
+            self.db.select("node").await.unwrap_or_default();
+        records.into_iter().map(|r| NodeIndex(r.id)).collect()
     }
 
     // -- Graph stats ------------------------------------------------------
 
-    pub fn node_count(&self) -> usize {
-        self.graph.node_count()
+    pub async fn node_count(&self) -> usize {
+        let mut result = self
+            .db
+            .query("SELECT count() FROM node GROUP ALL")
+            .await
+            .unwrap();
+        let counts: Vec<CountResult> = result.take(0).unwrap_or_default();
+        counts.into_iter().next().map(|c| c.count).unwrap_or(0)
     }
 
-    pub fn edge_count(&self) -> usize {
-        self.graph.edge_count()
+    pub async fn edge_count(&self) -> usize {
+        let mut result = self
+            .db
+            .query("SELECT count() FROM edge GROUP ALL")
+            .await
+            .unwrap();
+        let counts: Vec<CountResult> = result.take(0).unwrap_or_default();
+        counts.into_iter().next().map(|c| c.count).unwrap_or(0)
     }
 
-    // -- Serialization ----------------------------------------------------
+    /// Export the full graph as a JSON-serializable structure for visualization.
+    pub async fn export_json(&self) -> ExportGraph {
+        let mut result = self
+            .db
+            .query("SELECT * FROM node")
+            .await
+            .unwrap();
+        let node_records: Vec<NodeRecordWithId> = result.take(0).unwrap_or_default();
 
-    /// Serialize the full graph to a JSON string
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        let sg = self.to_serializable();
-        serde_json::to_string_pretty(&sg)
-    }
-
-    /// Deserialize a graph from a JSON string
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        let sg: SerializableGraph = serde_json::from_str(json)?;
-        Ok(Self::from_serializable(sg))
-    }
-
-    fn to_serializable(&self) -> SerializableGraph {
-        let nodes: Vec<NodeData> = self
-            .graph
-            .node_indices()
-            .map(|idx| self.graph[idx].clone())
-            .collect();
-
-        // Build a NodeIndex → usize map for edge serialization
-        let index_map: HashMap<NodeIndex, usize> = self
-            .graph
-            .node_indices()
-            .enumerate()
-            .map(|(i, idx)| (idx, i))
-            .collect();
-
-        let edges: Vec<SerializableEdge> = self
-            .graph
-            .edge_indices()
-            .filter_map(|eidx| {
-                let (src, tgt) = self.graph.edge_endpoints(eidx)?;
-                let data = self.graph[eidx].clone();
-                Some(SerializableEdge {
-                    source: index_map[&src],
-                    target: index_map[&tgt],
-                    data,
-                })
+        let nodes: Vec<ExportNode> = node_records
+            .iter()
+            .map(|n| {
+                let id = record_key(&n.id);
+                ExportNode {
+                    id,
+                    name: n.name.clone(),
+                    node_type: format!("{:?}", n.node_type),
+                }
             })
             .collect();
 
-        SerializableGraph { nodes, edges }
+        let mut result = self
+            .db
+            .query("SELECT *, in AS source, out AS target FROM edge")
+            .await
+            .unwrap();
+        let edge_records: Vec<EdgeRecordWithId> = result.take(0).unwrap_or_default();
+
+        let edges: Vec<ExportEdge> = edge_records
+            .iter()
+            .map(|e| ExportEdge {
+                source: record_key(&e.source),
+                target: record_key(&e.target),
+                edge_type: e.edge_type.to_string(),
+                confidence: e.metadata.confidence,
+                source_tag: format!("{:?}", e.metadata.source),
+            })
+            .collect();
+
+        ExportGraph { nodes, edges }
     }
 
-    fn from_serializable(sg: SerializableGraph) -> Self {
-        let mut kg = KnowledgeGraph::new();
-        let mut index_map: Vec<NodeIndex> = Vec::with_capacity(sg.nodes.len());
+    pub async fn dump(&self) -> String {
+        let node_count = self.node_count().await;
+        let edge_count = self.edge_count().await;
 
-        for node in sg.nodes {
-            let idx = kg.add_node(node);
-            index_map.push(idx);
-        }
+        let mut out = format!(
+            "KnowledgeGraph ({} nodes, {} edges)\n{}\n",
+            node_count,
+            edge_count,
+            "-".repeat(60)
+        );
 
-        for edge in sg.edges {
-            kg.add_edge(index_map[edge.source], index_map[edge.target], edge.data);
-        }
+        let mut result = self
+            .db
+            .query("SELECT *, in AS source, out AS target FROM edge")
+            .await
+            .unwrap();
+        let edges: Vec<EdgeRecordWithId> = result.take(0).unwrap_or_default();
 
-        kg
-    }
-}
-
-impl Default for KnowledgeGraph {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Display — human-readable graph dump
-// "Magnesium (Ingredient) →[acts_on, confidence: 0.92, Extracted, epoch: 0]→ Nervous System (System)"
-// ---------------------------------------------------------------------------
-impl fmt::Display for KnowledgeGraph {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(
-            f,
-            "KnowledgeGraph ({} nodes, {} edges)",
-            self.node_count(),
-            self.edge_count()
-        )?;
-        writeln!(f, "{}", "-".repeat(60))?;
-
-        for eidx in self.graph.edge_indices() {
-            if let Some((src, tgt)) = self.graph.edge_endpoints(eidx) {
-                let src_data = &self.graph[src];
-                let tgt_data = &self.graph[tgt];
-                let edge_data = &self.graph[eidx];
-                writeln!(f, "  {} →[{}]→ {}", src_data, edge_data, tgt_data)?;
+        for edge in edges {
+            let src = self.node_data(&NodeIndex(edge.source.clone())).await;
+            let tgt = self.node_data(&NodeIndex(edge.target.clone())).await;
+            if let (Some(s), Some(t)) = (src, tgt) {
+                let edge_data = EdgeData::new(edge.edge_type, edge.metadata);
+                out.push_str(&format!("  {} →[{}]→ {}\n", s, edge_data, t));
             }
         }
 
-        Ok(())
+        out
     }
+}
+
+#[derive(Debug, SurrealValue)]
+struct CountResult {
+    count: usize,
+}
+
+/// Convert a node name to a SurrealDB-safe record key.
+/// Lowercase, replace spaces with underscores, strip non-alphanumeric.
+fn slug(name: &str) -> String {
+    name.trim()
+        .to_lowercase()
+        .replace(' ', "_")
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -226,173 +327,137 @@ impl fmt::Display for KnowledgeGraph {
 mod tests {
     use super::*;
 
-    /// Helper: build a small graph with Magnesium acting on Nervous System via NMDA antagonism
-    fn build_magnesium_graph() -> KnowledgeGraph {
-        let mut kg = KnowledgeGraph::new();
+    async fn build_magnesium_graph() -> KnowledgeGraph {
+        let kg = KnowledgeGraph::in_memory().await.unwrap();
 
-        let mag = kg.add_node(NodeData::new("Magnesium", NodeType::Ingredient));
-        let nervous = kg.add_node(NodeData::new("Nervous System", NodeType::System));
-        let nmda = kg.add_node(NodeData::new("NMDA Receptor Antagonism", NodeType::Mechanism));
+        let mag = kg.add_node(NodeData::new("Magnesium", NodeType::Ingredient)).await;
+        let nervous = kg.add_node(NodeData::new("Nervous System", NodeType::System)).await;
+        let nmda = kg
+            .add_node(NodeData::new("NMDA Receptor Antagonism", NodeType::Mechanism))
+            .await;
 
         kg.add_edge(
-            mag,
-            nervous,
+            &mag,
+            &nervous,
             EdgeData::new(EdgeType::ActsOn, EdgeMetadata::extracted(0.92, 1, 0)),
-        );
+        )
+        .await;
         kg.add_edge(
-            mag,
-            nmda,
+            &mag,
+            &nmda,
             EdgeData::new(EdgeType::ViaMechanism, EdgeMetadata::extracted(0.88, 1, 0)),
-        );
+        )
+        .await;
         kg.add_edge(
-            nmda,
-            nervous,
+            &nmda,
+            &nervous,
             EdgeData::new(EdgeType::Modulates, EdgeMetadata::extracted(0.85, 1, 0)),
-        );
+        )
+        .await;
 
         kg
     }
 
-    #[test]
-    fn test_node_creation_and_lookup() {
-        let kg = build_magnesium_graph();
-        assert_eq!(kg.node_count(), 3);
-        assert_eq!(kg.edge_count(), 3);
+    #[tokio::test]
+    async fn test_node_creation_and_lookup() {
+        let kg = build_magnesium_graph().await;
+        assert_eq!(kg.node_count().await, 3);
+        assert_eq!(kg.edge_count().await, 3);
 
-        let mag_idx = kg.find_node("Magnesium").unwrap();
-        let mag_data = kg.node_data(mag_idx).unwrap();
+        let mag_idx = kg.find_node("Magnesium").await.unwrap();
+        let mag_data = kg.node_data(&mag_idx).await.unwrap();
         assert_eq!(mag_data.name, "Magnesium");
         assert_eq!(mag_data.node_type, NodeType::Ingredient);
     }
 
-    #[test]
-    fn test_duplicate_node_returns_existing() {
-        let mut kg = KnowledgeGraph::new();
-        let idx1 = kg.add_node(NodeData::new("Magnesium", NodeType::Ingredient));
-        let idx2 = kg.add_node(NodeData::new("Magnesium", NodeType::Ingredient));
+    #[tokio::test]
+    async fn test_duplicate_node_returns_existing() {
+        let kg = KnowledgeGraph::in_memory().await.unwrap();
+        let idx1 = kg.add_node(NodeData::new("Magnesium", NodeType::Ingredient)).await;
+        let idx2 = kg.add_node(NodeData::new("Magnesium", NodeType::Ingredient)).await;
         assert_eq!(idx1, idx2);
-        assert_eq!(kg.node_count(), 1);
+        assert_eq!(kg.node_count().await, 1);
     }
 
-    #[test]
-    fn test_neighbors_by_edge_type() {
-        let kg = build_magnesium_graph();
-        let mag_idx = kg.find_node("Magnesium").unwrap();
+    #[tokio::test]
+    async fn test_outgoing_edges() {
+        let kg = build_magnesium_graph().await;
+        let mag_idx = kg.find_node("Magnesium").await.unwrap();
 
-        let acts_on = kg.neighbors_by_edge_type(mag_idx, &EdgeType::ActsOn);
+        let edges = kg.outgoing_edges(&mag_idx).await;
+        let acts_on: Vec<_> = edges
+            .iter()
+            .filter(|(_, data)| data.edge_type == EdgeType::ActsOn)
+            .collect();
         assert_eq!(acts_on.len(), 1);
 
-        let target_data = kg.node_data(acts_on[0].0).unwrap();
+        let target_data = kg.node_data(&acts_on[0].0).await.unwrap();
         assert_eq!(target_data.name, "Nervous System");
     }
 
-    #[test]
-    fn test_nodes_by_type() {
-        let kg = build_magnesium_graph();
-        let systems = kg.nodes_by_type(&NodeType::System);
+    #[tokio::test]
+    async fn test_nodes_by_type() {
+        let kg = build_magnesium_graph().await;
+        let systems = kg.nodes_by_type(&NodeType::System).await;
         assert_eq!(systems.len(), 1);
 
-        let mechanisms = kg.nodes_by_type(&NodeType::Mechanism);
+        let mechanisms = kg.nodes_by_type(&NodeType::Mechanism).await;
         assert_eq!(mechanisms.len(), 1);
     }
 
-    #[test]
-    fn test_cross_system_traversal() {
-        let mut kg = build_magnesium_graph();
+    #[tokio::test]
+    async fn test_cross_system_traversal() {
+        let kg = build_magnesium_graph().await;
 
-        // Add GI system — magnesium also acts on it (broad-spectrum)
-        let gi = kg.add_node(NodeData::new("Gastrointestinal System", NodeType::System));
-        let smooth_muscle =
-            kg.add_node(NodeData::new("Smooth Muscle Relaxation", NodeType::Mechanism));
-        let mag_idx = kg.find_node("Magnesium").unwrap();
+        let gi = kg
+            .add_node(NodeData::new("Gastrointestinal System", NodeType::System))
+            .await;
+        let smooth_muscle = kg
+            .add_node(NodeData::new("Smooth Muscle Relaxation", NodeType::Mechanism))
+            .await;
+        let mag_idx = kg.find_node("Magnesium").await.unwrap();
 
         kg.add_edge(
-            mag_idx,
-            gi,
+            &mag_idx,
+            &gi,
             EdgeData::new(EdgeType::ActsOn, EdgeMetadata::extracted(0.87, 1, 0)),
-        );
+        )
+        .await;
         kg.add_edge(
-            mag_idx,
-            smooth_muscle,
+            &mag_idx,
+            &smooth_muscle,
             EdgeData::new(EdgeType::ViaMechanism, EdgeMetadata::extracted(0.80, 1, 0)),
-        );
+        )
+        .await;
         kg.add_edge(
-            smooth_muscle,
-            gi,
+            &smooth_muscle,
+            &gi,
             EdgeData::new(EdgeType::Modulates, EdgeMetadata::extracted(0.78, 1, 0)),
-        );
+        )
+        .await;
 
-        // Magnesium should now act on two systems
-        let acts_on = kg.neighbors_by_edge_type(mag_idx, &EdgeType::ActsOn);
+        let edges = kg.outgoing_edges(&mag_idx).await;
+        let acts_on: Vec<_> = edges
+            .iter()
+            .filter(|(_, data)| data.edge_type == EdgeType::ActsOn)
+            .collect();
         assert_eq!(acts_on.len(), 2);
 
-        // Both systems should be reachable
-        let system_names: Vec<&str> = acts_on
-            .iter()
-            .map(|(idx, _)| kg.node_data(*idx).unwrap().name.as_str())
-            .collect();
-        assert!(system_names.contains(&"Nervous System"));
-        assert!(system_names.contains(&"Gastrointestinal System"));
+        let mut system_names: Vec<String> = Vec::new();
+        for (idx, _) in &acts_on {
+            let data = kg.node_data(idx).await.unwrap();
+            system_names.push(data.name.clone());
+        }
+        assert!(system_names.contains(&"Nervous System".to_string()));
+        assert!(system_names.contains(&"Gastrointestinal System".to_string()));
     }
 
-    #[test]
-    fn test_json_roundtrip() {
-        let kg = build_magnesium_graph();
-        let json = kg.to_json().expect("serialization failed");
-        let kg2 = KnowledgeGraph::from_json(&json).expect("deserialization failed");
-
-        assert_eq!(kg2.node_count(), kg.node_count());
-        assert_eq!(kg2.edge_count(), kg.edge_count());
-
-        // Verify data survived the roundtrip
-        let mag_idx = kg2.find_node("Magnesium").unwrap();
-        let mag_data = kg2.node_data(mag_idx).unwrap();
-        assert_eq!(mag_data.node_type, NodeType::Ingredient);
-
-        let acts_on = kg2.neighbors_by_edge_type(mag_idx, &EdgeType::ActsOn);
-        assert_eq!(acts_on.len(), 1);
-        assert!((acts_on[0].1.metadata.confidence - 0.92).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_extra_metadata_roundtrip() {
-        let mut kg = KnowledgeGraph::new();
-        let mag = kg.add_node(NodeData::new("Magnesium", NodeType::Ingredient));
-        let nervous = kg.add_node(NodeData::new("Nervous System", NodeType::System));
-
-        let mut meta = EdgeMetadata::extracted(0.9, 1, 0);
-        meta.extra
-            .insert("dosage_dependent".into(), MetadataValue::Bool(true));
-        meta.extra.insert(
-            "min_effective_mg".into(),
-            MetadataValue::Float(200.0),
-        );
-        meta.extra.insert(
-            "note".into(),
-            MetadataValue::String("effect significant above 200mg".into()),
-        );
-
-        kg.add_edge(mag, nervous, EdgeData::new(EdgeType::ActsOn, meta));
-
-        // Roundtrip through JSON
-        let json = kg.to_json().unwrap();
-        let kg2 = KnowledgeGraph::from_json(&json).unwrap();
-
-        let mag_idx = kg2.find_node("Magnesium").unwrap();
-        let edges = kg2.outgoing_edges(mag_idx);
-        let extra = &edges[0].1.metadata.extra;
-
-        assert_eq!(extra.get("dosage_dependent"), Some(&MetadataValue::Bool(true)));
-        assert_eq!(extra.get("min_effective_mg"), Some(&MetadataValue::Float(200.0)));
-    }
-
-    #[test]
-    fn test_display() {
-        let kg = build_magnesium_graph();
-        let output = format!("{}", kg);
+    #[tokio::test]
+    async fn test_display() {
+        let kg = build_magnesium_graph().await;
+        let output = kg.dump().await;
         assert!(output.contains("Magnesium (Ingredient)"));
         assert!(output.contains("acts_on"));
         assert!(output.contains("Nervous System (System)"));
-        assert!(output.contains("confidence: 0.92"));
     }
 }

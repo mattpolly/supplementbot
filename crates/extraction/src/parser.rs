@@ -1,10 +1,12 @@
+use chrono::Utc;
 use event_log::events::{
     CurriculumStage, EdgeRef, MutationOp, NodeRef, PipelineEvent,
     TokenUsage as EventTokenUsage,
 };
 use event_log::sink::EventSink;
-use graph_service::graph::KnowledgeGraph;
+use graph_service::graph::{KnowledgeGraph, NodeIndex};
 use graph_service::lens::ComplexityLens;
+use graph_service::source::SourceStore;
 use graph_service::types::*;
 use llm_client::provider::{CompletionRequest, LlmProvider};
 use uuid::Uuid;
@@ -35,6 +37,9 @@ pub struct ExtractionParser<'a> {
     iteration: u32,
     epoch: u32,
     lens: ComplexityLens,
+    source_override: Option<Source>,
+    confidence_override: Option<f64>,
+    source_store: Option<&'a SourceStore>,
 }
 
 impl<'a> ExtractionParser<'a> {
@@ -50,12 +55,33 @@ impl<'a> ExtractionParser<'a> {
             iteration,
             epoch,
             lens: ComplexityLens::default(),
+            source_override: None,
+            confidence_override: None,
+            source_store: None,
         }
     }
 
     /// Set the complexity lens for this parser
     pub fn with_lens(mut self, lens: ComplexityLens) -> Self {
         self.lens = lens;
+        self
+    }
+
+    /// Override the edge source (default: Extracted)
+    pub fn with_source(mut self, source: Source) -> Self {
+        self.source_override = Some(source);
+        self
+    }
+
+    /// Override the edge confidence (default: stage-derived)
+    pub fn with_confidence(mut self, confidence: f64) -> Self {
+        self.confidence_override = Some(confidence);
+        self
+    }
+
+    /// Attach a source store for recording provenance observations
+    pub fn with_source_store(mut self, store: &'a SourceStore) -> Self {
+        self.source_store = Some(store);
         self
     }
 
@@ -68,7 +94,7 @@ impl<'a> ExtractionParser<'a> {
         nutraceutical: &str,
         sentence: &str,
         stage: CurriculumStage,
-        graph: &mut KnowledgeGraph,
+        graph: &KnowledgeGraph,
         correlation_id: Uuid,
     ) -> ExtractionSummary {
         // Emit extraction input event
@@ -82,13 +108,13 @@ impl<'a> ExtractionParser<'a> {
         );
 
         // Collect existing node names with types so the LLM can reuse them
-        let existing_vocab: Vec<String> = graph
-            .all_nodes()
-            .iter()
-            .filter_map(|&idx| {
-                graph.node_data(idx).map(|n| format!("{} ({:?})", n.name, n.node_type))
-            })
-            .collect();
+        let all_nodes = graph.all_nodes().await;
+        let mut existing_vocab: Vec<String> = Vec::new();
+        for idx in &all_nodes {
+            if let Some(n) = graph.node_data(idx).await {
+                existing_vocab.push(format!("{} ({:?})", n.name, n.node_type));
+            }
+        }
         let existing_refs: Vec<&str> = existing_vocab.iter().map(|s| s.as_str()).collect();
 
         // Ask LLM for structured triples (prompt is lens-aware + vocabulary-aware)
@@ -135,11 +161,11 @@ impl<'a> ExtractionParser<'a> {
         // Parse the response into triples (lens enforces type visibility)
         let (triples, mut warnings) = prompt::parse_triples(&raw_response, Some(&self.lens));
 
-        // Assign confidence based on stage
-        let base_confidence = match stage {
+        // Assign confidence based on stage (or override)
+        let base_confidence = self.confidence_override.unwrap_or(match stage {
             CurriculumStage::Foundational => 0.7,
             CurriculumStage::Relational => 0.85,
-        };
+        });
 
         // Write triples into the graph
         let mut nodes_added = Vec::new();
@@ -148,15 +174,15 @@ impl<'a> ExtractionParser<'a> {
 
         for triple in &triples {
             let (src_ref, src_idx) =
-                self.ensure_node(graph, &triple.subject_name, &triple.subject_type, correlation_id);
+                self.ensure_node(graph, &triple.subject_name, &triple.subject_type, correlation_id).await;
             let (tgt_ref, tgt_idx) =
-                self.ensure_node(graph, &triple.object_name, &triple.object_type, correlation_id);
+                self.ensure_node(graph, &triple.object_name, &triple.object_type, correlation_id).await;
 
             // Re-validate type pair against *stored* node types (may differ from parsed types
             // when a node already existed with a different type)
-            let stored_src_type = &graph.node_data(src_idx).unwrap().node_type;
-            let stored_tgt_type = &graph.node_data(tgt_idx).unwrap().node_type;
-            if !triple.edge_type.is_valid_pair(stored_src_type, stored_tgt_type) {
+            let stored_src_type = graph.node_data(&src_idx).await.unwrap().node_type;
+            let stored_tgt_type = graph.node_data(&tgt_idx).await.unwrap().node_type;
+            if !triple.edge_type.is_valid_pair(&stored_src_type, &stored_tgt_type) {
                 warnings.push(format!(
                     "type pair {:?}→{:?} invalid for edge {:?}, skipping: \"{}|{:?}|{}|{}|{:?}\"",
                     stored_src_type, stored_tgt_type, triple.edge_type,
@@ -181,14 +207,24 @@ impl<'a> ExtractionParser<'a> {
             };
 
             // Check for duplicate edge before adding
-            if !self.edge_exists(graph, src_idx, tgt_idx, &triple.edge_type) {
-                let metadata = EdgeMetadata::extracted(base_confidence, self.iteration, self.epoch);
+            if !self.edge_exists(graph, &src_idx, &tgt_idx, &triple.edge_type).await {
+                let metadata = match &self.source_override {
+                    Some(Source::StructurallyEmergent) => {
+                        EdgeMetadata::emergent(base_confidence, self.iteration, self.epoch)
+                    }
+                    _ => EdgeMetadata::extracted(base_confidence, self.iteration, self.epoch),
+                };
                 graph.add_edge(
-                    src_idx,
-                    tgt_idx,
+                    &src_idx,
+                    &tgt_idx,
                     EdgeData::new(triple.edge_type.clone(), metadata),
-                );
+                ).await;
 
+                let source_tag = match &self.source_override {
+                    Some(Source::StructurallyEmergent) => "StructurallyEmergent",
+                    Some(Source::Deduced) => "Deduced",
+                    _ => "Extracted",
+                };
                 self.sink.emit(
                     correlation_id,
                     PipelineEvent::GraphEdgeMutation {
@@ -197,11 +233,58 @@ impl<'a> ExtractionParser<'a> {
                         target_node: triple.object_name.clone(),
                         edge_type: format!("{}", triple.edge_type),
                         confidence: base_confidence,
+                        source_tag: Some(source_tag.to_string()),
+                        provider: Some(self.provider.provider_name().to_string()),
+                        model: Some(self.provider.model_name().to_string()),
                     },
                 );
 
+                // Record edge creation provenance
+                if let Some(store) = self.source_store {
+                    store
+                        .record_edge_created(
+                            &triple.subject_name,
+                            &triple.object_name,
+                            &format!("{}", triple.edge_type),
+                            base_confidence,
+                            source_tag,
+                            self.provider.provider_name(),
+                            self.provider.model_name(),
+                            correlation_id,
+                            Utc::now(),
+                        )
+                        .await;
+                }
+
                 edges_added.push(edge_ref);
             } else {
+                // Edge already exists — emit confirmation event (evidence signal)
+                self.sink.emit(
+                    correlation_id,
+                    PipelineEvent::EdgeConfirmed {
+                        source_node: triple.subject_name.clone(),
+                        target_node: triple.object_name.clone(),
+                        edge_type: format!("{}", triple.edge_type),
+                        provider: self.provider.provider_name().to_string(),
+                        model: self.provider.model_name().to_string(),
+                    },
+                );
+
+                // Record edge confirmation provenance
+                if let Some(store) = self.source_store {
+                    store
+                        .record_edge_confirmed(
+                            &triple.subject_name,
+                            &triple.object_name,
+                            &format!("{}", triple.edge_type),
+                            self.provider.provider_name(),
+                            self.provider.model_name(),
+                            correlation_id,
+                            Utc::now(),
+                        )
+                        .await;
+                }
+
                 edges_confirmed.push(edge_ref);
             }
         }
@@ -229,15 +312,15 @@ impl<'a> ExtractionParser<'a> {
     }
 
     /// Add a node to the graph if it doesn't exist yet.
-    fn ensure_node(
+    async fn ensure_node(
         &self,
-        graph: &mut KnowledgeGraph,
+        graph: &KnowledgeGraph,
         name: &str,
         node_type: &NodeType,
         correlation_id: Uuid,
-    ) -> (Option<NodeRef>, graph_service::graph::NodeIndex) {
-        let already_exists = graph.find_node(name).is_some();
-        let idx = graph.add_node(NodeData::new(name, node_type.clone()));
+    ) -> (Option<NodeRef>, NodeIndex) {
+        let already_exists = graph.find_node(name).await.is_some();
+        let idx = graph.add_node(NodeData::new(name, node_type.clone())).await;
 
         if already_exists {
             (None, idx)
@@ -256,22 +339,37 @@ impl<'a> ExtractionParser<'a> {
                 },
             );
 
+            // Record node provenance
+            if let Some(store) = self.source_store {
+                store
+                    .record_node_observation(
+                        name,
+                        &format!("{:?}", node_type),
+                        self.provider.provider_name(),
+                        self.provider.model_name(),
+                        correlation_id,
+                        Utc::now(),
+                    )
+                    .await;
+            }
+
             (Some(node_ref), idx)
         }
     }
 
     /// Check if an edge with the same type already exists between two nodes
-    fn edge_exists(
+    async fn edge_exists(
         &self,
         graph: &KnowledgeGraph,
-        source: graph_service::graph::NodeIndex,
-        target: graph_service::graph::NodeIndex,
+        source: &NodeIndex,
+        target: &NodeIndex,
         edge_type: &EdgeType,
     ) -> bool {
         graph
             .outgoing_edges(source)
+            .await
             .iter()
-            .any(|(tgt, data)| *tgt == target && data.edge_type == *edge_type)
+            .any(|(tgt, data)| *tgt == *target && data.edge_type == *edge_type)
     }
 }
 
@@ -304,7 +402,7 @@ mod tests {
         let provider = mock_provider();
         let sink = MemorySink::new();
         let parser = ExtractionParser::new(&provider, &sink, 1, 0);
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
         let summary = parser
@@ -312,13 +410,13 @@ mod tests {
                 "Magnesium",
                 "Magnesium helps your muscles relax and helps you sleep better.",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
 
-        assert_eq!(graph.node_count(), 4);
-        assert_eq!(graph.edge_count(), 3);
+        assert_eq!(graph.node_count().await, 4);
+        assert_eq!(graph.edge_count().await, 3);
         assert_eq!(summary.edges_added.len(), 3);
         assert!(summary.warnings.is_empty());
     }
@@ -328,7 +426,7 @@ mod tests {
         let provider = mock_provider();
         let sink = MemorySink::new();
         let parser = ExtractionParser::new(&provider, &sink, 1, 0);
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
         parser
@@ -336,7 +434,7 @@ mod tests {
                 "Magnesium",
                 "Magnesium helps your muscles relax and helps you sleep better.",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
@@ -346,13 +444,13 @@ mod tests {
                 "Magnesium",
                 "Magnesium helps your muscles relax and helps you sleep better.",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
 
-        assert_eq!(graph.node_count(), 4);
-        assert_eq!(graph.edge_count(), 3);
+        assert_eq!(graph.node_count().await, 4);
+        assert_eq!(graph.edge_count().await, 3);
     }
 
     #[tokio::test]
@@ -360,7 +458,7 @@ mod tests {
         let provider = mock_provider();
         let sink = MemorySink::new();
         let parser = ExtractionParser::new(&provider, &sink, 1, 0);
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
         // First extraction — all edges are new
@@ -369,7 +467,7 @@ mod tests {
                 "Magnesium",
                 "Magnesium helps your muscles relax and helps you sleep better.",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
@@ -383,7 +481,7 @@ mod tests {
                 "Magnesium",
                 "Magnesium helps your muscles relax and helps you sleep better.",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
@@ -408,7 +506,7 @@ mod tests {
 
         let sink = MemorySink::new();
         let parser = ExtractionParser::new(&provider, &sink, 1, 0);
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
         parser
@@ -416,7 +514,7 @@ mod tests {
                 "Magnesium",
                 "Magnesium helps your muscles relax.",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
@@ -426,14 +524,14 @@ mod tests {
                 "Magnesium",
                 "Magnesium calms the nervous system.",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
 
-        assert!(graph.find_node("nervous system").is_some());
-        assert_eq!(graph.node_count(), 4);
-        assert_eq!(graph.edge_count(), 3);
+        assert!(graph.find_node("nervous system").await.is_some());
+        assert_eq!(graph.node_count().await, 4);
+        assert_eq!(graph.edge_count().await, 3);
     }
 
     #[tokio::test]
@@ -441,7 +539,7 @@ mod tests {
         let provider = MockProvider::new("mock", "mock-v1")
             .with_default("magnesium|Ingredient|acts_on|nervous system|System");
         let sink = MemorySink::new();
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
         let parser = ExtractionParser::new(&provider, &sink, 1, 0);
@@ -450,13 +548,13 @@ mod tests {
                 "Magnesium",
                 "sentence one",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
 
-        let mag_idx = graph.find_node("magnesium").unwrap();
-        let edges = graph.outgoing_edges(mag_idx);
+        let mag_idx = graph.find_node("magnesium").await.unwrap();
+        let edges = graph.outgoing_edges(&mag_idx).await;
         assert!((edges[0].1.metadata.confidence - 0.7).abs() < f64::EPSILON);
     }
 
@@ -465,7 +563,7 @@ mod tests {
         let provider = mock_provider();
         let sink = MemorySink::new();
         let parser = ExtractionParser::new(&provider, &sink, 1, 0);
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
         parser
@@ -473,7 +571,7 @@ mod tests {
                 "Magnesium",
                 "Magnesium helps your muscles relax.",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
@@ -500,7 +598,7 @@ mod tests {
         let sink = MemorySink::new();
         let parser = ExtractionParser::new(&provider, &sink, 1, 0)
             .with_lens(ComplexityLens::fifth_grade());
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
         let corr_id = Uuid::new_v4();
 
         let summary = parser
@@ -508,13 +606,13 @@ mod tests {
                 "Magnesium",
                 "something",
                 CurriculumStage::Foundational,
-                &mut graph,
+                &graph,
                 corr_id,
             )
             .await;
 
         // Should have rejected the triple
-        assert_eq!(graph.edge_count(), 0);
+        assert_eq!(graph.edge_count().await, 0);
         assert!(
             summary.warnings.iter().any(|w| w.contains("exceeds complexity")),
             "should warn about complexity violation"

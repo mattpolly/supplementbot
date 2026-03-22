@@ -25,18 +25,18 @@ pub async fn check_comprehension(
     provider: &dyn LlmProvider,
     sink: &dyn EventSink,
     parser: &ExtractionParser<'_>,
-    graph: &mut KnowledgeGraph,
+    graph: &KnowledgeGraph,
     nutraceutical: &str,
     correlation_id: Uuid,
 ) -> ComprehensionResult {
-    let summary = prompts::summarize_graph_for_comprehension(graph, nutraceutical);
+    let summary = prompts::summarize_graph_for_comprehension(graph, nutraceutical).await;
 
     if summary.is_empty() {
         return ComprehensionResult {
             rephrase: String::new(),
             edges_confirmed: 0,
             edges_new: 0,
-            edges_total: graph.edge_count(),
+            edges_total: graph.edge_count().await,
         };
     }
 
@@ -45,7 +45,7 @@ pub async fn check_comprehension(
         .with_system(prompts::comprehension_system_prompt().to_string())
         .with_temperature(0.3); // slight variation for rephrasing
 
-    let edges_before = graph.edge_count();
+    let edges_before = graph.edge_count().await;
 
     let rephrase = match provider.complete(request).await {
         Ok(response) => {
@@ -93,7 +93,7 @@ pub async fn check_comprehension(
         )
         .await;
 
-    let edges_after = graph.edge_count();
+    let edges_after = graph.edge_count().await;
     let edges_new = extraction.edges_added.len();
     let edges_confirmed = extraction.edges_confirmed.len();
 
@@ -145,26 +145,26 @@ mod tests {
 
         let sink = MemorySink::new();
         let parser = ExtractionParser::new(&provider, &sink, 1, 0);
-        let mut graph = KnowledgeGraph::new();
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
 
         // Pre-populate graph with existing knowledge
-        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient));
-        let prop1 = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property));
-        let prop2 = graph.add_node(NodeData::new("sleep quality", NodeType::Property));
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        let prop1 = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property)).await;
+        let prop2 = graph.add_node(NodeData::new("sleep quality", NodeType::Property)).await;
         graph.add_edge(
-            mag,
-            prop1,
+            &mag,
+            &prop1,
             EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0)),
-        );
+        ).await;
         graph.add_edge(
-            mag,
-            prop2,
+            &mag,
+            &prop2,
             EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0)),
-        );
+        ).await;
 
         let corr_id = Uuid::new_v4();
         let result = check_comprehension(
-            &provider, &sink, &parser, &mut graph, "Magnesium", corr_id,
+            &provider, &sink, &parser, &graph, "Magnesium", corr_id,
         )
         .await;
 
@@ -181,17 +181,17 @@ mod tests {
 
         let sink = MemorySink::new();
         let parser = ExtractionParser::new(&provider, &sink, 1, 0);
-        let mut graph = KnowledgeGraph::new();
-        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient));
-        let sys = graph.add_node(NodeData::new("muscular system", NodeType::System));
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        let sys = graph.add_node(NodeData::new("muscular system", NodeType::System)).await;
         graph.add_edge(
-            mag,
-            sys,
+            &mag,
+            &sys,
             EdgeData::new(EdgeType::ActsOn, EdgeMetadata::extracted(0.7, 1, 0)),
-        );
+        ).await;
 
         let corr_id = Uuid::new_v4();
-        check_comprehension(&provider, &sink, &parser, &mut graph, "Magnesium", corr_id).await;
+        check_comprehension(&provider, &sink, &parser, &graph, "Magnesium", corr_id).await;
 
         let events = sink.events_for(corr_id);
         let has_check = events
