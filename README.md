@@ -1,37 +1,66 @@
 # Supplementbot
 
-A neurosymbolic AI system for systemic wellness that maps how nutraceuticals interact with the human body. It combines LLM-based extraction (the neural layer) with a typed knowledge graph (the symbolic layer) to build structured, auditable representations of supplement science.
+A neurosymbolic AI system for systemic wellness that maps how nutraceuticals interact with the human body. It combines LLM-based extraction (the neural layer) with a typed knowledge graph (the symbolic layer) to build structured, auditable representations of supplement science — then uses that knowledge to guide real conversations with users about their symptoms.
 
-**Legal constraint:** This system never diagnoses and never uses the word "cure." All language is framed around symptoms and treatments.
+**Legal constraint:** This system never diagnoses and never uses the word "cure." All language is framed around symptoms and body systems.
 
-## How It Works
+## Architecture
 
-Supplementbot uses an iterative **NSAI loop** to teach a knowledge graph about supplements:
+Supplementbot has two main layers:
 
-1. **Seed** — Ask an LLM a simple question about a supplement ("What does magnesium do?")
-2. **Extract** — Parse the response into typed graph triples (nodes + edges)
-3. **Analyze gaps** — Inspect the graph for missing connections (leaf nodes, missing mechanisms)
-4. **Fill gaps** — Ask targeted follow-up questions and extract the answers
-5. **Comprehension check** — Have the LLM rephrase its understanding; re-extract and compare for consistency
-6. **Structural inference** — Analyze the graph topology for cross-ingredient patterns (shared systems, mechanisms, convergent paths)
+1. **Knowledge building** — An NSAI loop teaches a knowledge graph about supplements by iteratively querying LLMs, extracting typed triples, analyzing gaps, and running structural inference. The graph persists in SurrealDB and grows across runs.
 
-The graph grows denser each iteration and **persists across runs** in a SurrealDB embedded database. Add one nutraceutical today, another tomorrow — the graph keeps growing and cross-ingredient observations get richer.
+2. **Intake conversation** — A web-facing agent conducts a clinical-style interview over WebSocket. An **intake knowledge graph** (process knowledge) drives the conversation — selecting questions via Expected Information Gain scoring, while a **supplement knowledge graph** (domain knowledge) provides the facts. The agent narrows from symptoms to supplement candidates across six phases.
 
-A **complexity lens** (continuous 0.0–1.0 dial) controls which ontology types are visible at each grade level, preventing advanced biochemistry from leaking into simple explanations.
+```
+User ↔ WebSocket ↔ Web Server
+                      ├── Safety filter (red flags, post-gen)
+                      ├── Extraction (cheap LLM → structured data)
+                      ├── Concept mapping (text → graph nodes)
+                      ├── Intake KG engine (next question + graph actions)
+                      ├── Graph executor (supplement KG + iDISK queries)
+                      ├── Context builder (LLM prompt assembly)
+                      └── Renderer LLM (natural language response)
+```
+
+### Intake Phases
+
+| Phase | Purpose |
+|-------|---------|
+| Chief Complaint | Capture what brought the user here |
+| HPI (OLDCARTS) | Characterize symptoms: onset, location, duration, character, aggravating/alleviating, radiation, timing, severity |
+| Review of Systems | Screen adjacent body systems |
+| Differentiation | Discriminate between top supplement candidates |
+| Causation Inquiry | Check if symptoms may be adverse reactions to current supplements |
+| Recommendation | Deliver ranked supplements with evidence and safety caveats |
+
+### Knowledge Graph
+
+The supplement KG uses 14 node types across three complexity tiers (foundational → intermediate → advanced) and 19 edge predicates. A **complexity lens** (continuous 0.0–1.0 dial) gates which types are visible, preventing advanced biochemistry from leaking into simple explanations.
+
+External data sources:
+- **iDISK 2.0** — 392 symptoms, 7,876 ingredients, 214 drugs, interaction/adverse reaction edges
+- **SuppKG** — lookup-only reference for cross-validation (edges are never imported)
 
 ## Project Structure
 
 ```
 supplementbot/
 ├── crates/
-│   ├── cli/              # Command-line interface
+│   ├── cli/              # CLI for NSAI loop runs
 │   ├── curriculum/       # Question generation by grade level
 │   ├── event-log/        # Structured JSONL observability
 │   ├── extraction/       # LLM response → typed graph triples
-│   ├── graph-service/    # Knowledge graph (SurrealDB) + ontology types + complexity lens
-│   ├── llm-client/       # Provider-agnostic LLM trait (Anthropic, Gemini, mock)
+│   ├── graph-service/    # Supplement KG + intake KG + ontology + complexity lens
+│   │   └── src/intake/   #   Intake KG engine, executor, iDISK importer, seed data
+│   ├── intake-agent/     # Session state, phase logic, safety, concept mapping, context builder
+│   ├── llm-client/       # Provider-agnostic LLM trait (Anthropic, Gemini, xAI/Grok, mock)
 │   ├── log-viewer/       # Terminal viewer for event logs
-│   └── nsai-loop/        # Loop orchestrator (gap analysis, filling, comprehension, structural inference)
+│   ├── nsai-loop/        # Loop orchestrator (gap analysis, filling, comprehension, structural inference)
+│   ├── suppkg/           # SuppKG data loader (lookup-only)
+│   └── web-server/       # Axum HTTP + WebSocket server, turn pipeline, session management
+├── docs/                 # Architecture docs (TECHNICAL.md, INTAKE.md, etc.)
+├── data/                 # iDISK + SuppKG data files (gitignored, ~683 MB)
 └── Cargo.toml            # Workspace root
 ```
 
@@ -41,7 +70,7 @@ supplementbot/
 
 - Rust (stable toolchain)
 - `libclang-dev` (for SurrealDB's RocksDB backend: `sudo apt install libclang-dev`)
-- An API key for at least one LLM provider
+- API keys for LLM providers
 
 ### Build
 
@@ -57,7 +86,39 @@ First build takes several minutes due to SurrealDB compilation. Subsequent build
 cargo test
 ```
 
-### Run the CLI
+### Run the Web Server
+
+```bash
+# Required: at least one LLM provider key
+export ANTHROPIC_API_KEY="..."    # renderer LLM
+export XAI_API_KEY="..."          # extractor LLM (or use Anthropic for both)
+
+# Optional
+export IDISK_DATA_DIR="./data"    # path to iDISK data files
+export GRAPH_PATH="~/.supplementbot/graph"
+export STATIC_DIR="./static"
+export PORT=3000
+
+cargo run --bin supplementbot-web
+```
+
+Connect via WebSocket at `ws://localhost:3000/ws/chat`. Health check at `GET /api/health`.
+
+#### Web Server Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HOST` | `0.0.0.0` | Bind address |
+| `PORT` | `3000` | Bind port |
+| `GRAPH_PATH` | `~/.supplementbot/graph` | SurrealDB database path |
+| `STATIC_DIR` | — | Static file directory for frontend |
+| `IDISK_DATA_DIR` | — | iDISK 2.0 data directory |
+| `MAX_CONCURRENT_SESSIONS` | `5` | Max simultaneous sessions |
+| `DAILY_SESSION_CAP` | `13` | Daily session limit |
+| `MONTHLY_SESSION_CAP` | `400` | Monthly session limit |
+| `SESSION_TIMEOUT_SECS` | `900` | Idle session timeout (15 min) |
+
+### Run the CLI (NSAI Loop)
 
 ```bash
 # With the mock provider (no API key needed)
@@ -72,13 +133,10 @@ cargo run --bin supplementbot -- --nutraceutical "Magnesium" --provider gemini
 # Multiple nutraceuticals in one run
 cargo run --bin supplementbot -- --nutraceutical "Magnesium,Zinc" --provider anthropic
 
-# Add nutraceuticals over time (graph persists between runs)
+# Graph persists between runs
 cargo run --bin supplementbot -- -n Magnesium -p anthropic
 cargo run --bin supplementbot -- -n Zinc -p anthropic
-# Second run loads existing graph, adds Zinc, shows cross-ingredient observations
 ```
-
-API keys are read from environment variables (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) or a `.env` file.
 
 #### CLI Options
 
@@ -95,34 +153,15 @@ API keys are read from environment variables (`ANTHROPIC_API_KEY`, `GEMINI_API_K
 ### View Event Logs
 
 ```bash
-# View all events
 cargo run --bin log-viewer -- events.jsonl
-
-# Filter by type
 cargo run --bin log-viewer -- events.jsonl --filter extraction
 cargo run --bin log-viewer -- events.jsonl --filter gap
-cargo run --bin log-viewer -- events.jsonl --filter comprehension
-cargo run --bin log-viewer -- events.jsonl --filter loop
 ```
 
-## Current Scope
+## Documentation
 
-The system currently operates at **5th grade level only** — proving the architecture works before adding complexity escalation. The ontology and lens system are designed for the full range (5th grade → graduate), but only the foundational tier is active.
-
-### Starting Nutraceuticals (planned)
-
-Magnesium, Zinc, Vitamin D, Omega-3 fatty acids, B-complex vitamins, Vitamin C, Curcumin, Probiotics, Ashwagandha, CoQ10
-
-## What This Demonstrates
-
-- **Neurosymbolic AI** — combining neural (LLM) and symbolic (graph) reasoning
-- **Persistent knowledge graph** — SurrealDB embedded database grows across runs
-- **Structural inference** — graph discovers cross-ingredient patterns without LLM involvement
-- **Affordance-based modeling** — "magnesium affords muscle relaxation" rather than rigid lookups
-- **Ontology complexity gating** — continuous dial prevents grade-inappropriate concepts from leaking
-- **Self-consistency checking** — rephrase test validates understanding before escalating
-- **Provider-agnostic design** — swap LLM providers without changing application logic
-- **Full observability** — every LLM call, extraction, and graph mutation is logged with correlation IDs
+- [TECHNICAL.md](docs/TECHNICAL.md) — Full architecture deep dive, crate by crate
+- [INTAKE.md](docs/INTAKE.md) — Intake KG + agent design, walkthrough, and decisions
 
 ## License
 

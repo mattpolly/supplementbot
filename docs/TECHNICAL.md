@@ -468,7 +468,7 @@ Tables: `node_alias`, `node_cui` in SurrealDB. Run before inference, not after.
 
 A second knowledge graph encoding **process knowledge** (how to interview a patient) as opposed to the supplement KG's **domain knowledge** (what we know about supplements). Shares the same SurrealDB instance with `intake_`-prefixed tables.
 
-See [INTAKE_KG.md](INTAKE_KG.md) for full design rationale.
+See [INTAKE.md](INTAKE.md) for full design rationale.
 
 ### Modules
 
@@ -501,10 +501,14 @@ Question selection uses Expected Information Gain (EIG): `priority × informatio
 
 ### Integration Status
 
+All pieces are built and wired together (2026-03-27):
+
 - Types, store, seed, engine, executor, iDISK importer: **implemented**
-- Wired into web-server handler: **not yet** (build_context_v2 exists but handler still calls v1)
-- iDISK data loaded into real DB: **not yet**
-- Seed data loaded into running instance: **not yet**
+- Web-server handler uses v2 pipeline (engine + executor + `build_context_v2`): **done**
+- Seed data runs at startup (idempotent): **done**
+- iDISK import runs at startup if `IDISK_DATA_DIR` env var points to a valid directory: **done**
+- `IntakeSession` carries traversal state (`visited_questions`, `goal_ask_counts`, `active_profiles`, `disclosed_supplements`, `last_differentiator_count`): **done**
+- `IntakePhase::CausationInquiry` added to session phase enum: **done**
 
 ---
 
@@ -518,7 +522,7 @@ Clinical reasoning engine for the conversational supplement intake interview.
 
 | Module | Purpose |
 |---|---|
-| `session.rs` | Session state: phase, chief complaints, OLDCARTS data, system reviews, candidates, lens level, turn history |
+| `session.rs` | Session state: phase, chief complaints, OLDCARTS data, system reviews, candidates, lens level, turn history, intake KG traversal state (visited questions, goal ask counts, active profiles) |
 | `phase.rs` | Phase transition logic + user signal detection (Engaged, Disengaged, WantsRecommendations, Correction, DoneSharing) |
 | `context.rs` | LLM system prompt builder (v1: hardcoded tasks; v2: graph-driven from TurnAction output) |
 | `candidates.rs` | Candidate ranking: intersection gate → sum scores → coverage bonus → negative evidence penalty → contraindication elimination |
@@ -528,7 +532,7 @@ Clinical reasoning engine for the conversational supplement intake interview.
 
 ### Phase Machine
 
-Five phases: ChiefComplaint → Hpi → ReviewOfSystems → Differentiation → Recommendation
+Six phases: ChiefComplaint → Hpi → ReviewOfSystems → Differentiation → CausationInquiry → Recommendation
 
 Key gates:
 - Medication/supplement disclosure required before any recommendation
@@ -563,23 +567,29 @@ Axum-based WebSocket server hosting the intake agent.
 - `graph: KnowledgeGraph` — supplement KG (persisted to disk)
 - `source: SourceStore` — edge quality metadata
 - `merge: MergeStore` — synonym resolution
+- `intake_store: IntakeGraphStore` — intake KG (process graph, same DB, `intake_`-prefixed tables)
+- `idisk: IdiskImporter` — iDISK 2.0 data (drug interactions, adverse reactions, mechanisms)
 - `renderer: Arc<dyn LlmProvider>` — expensive conversational LLM (env: RENDERER_PROVIDER/RENDERER_MODEL)
 - `extractor: Arc<dyn LlmProvider>` — cheap extraction LLM (env: EXTRACTOR_PROVIDER/EXTRACTOR_MODEL)
 - `sessions: SessionManager` — rate limiting and session tracking
 - `safety_filter: SafetyFilter` — compiled regex patterns
 
-### Turn Pipeline (10 steps)
+At startup, `init()` seeds the intake graph (idempotent) and optionally imports iDISK data from `IDISK_DATA_DIR`.
+
+### Turn Pipeline (v2 — intake KG driven, 10 steps)
 
 1. Red flag check (no graph, no LLM needed)
 2. Extract structured data via cheap extractor LLM
-3. Record turn, apply extraction to session
-4. Map concepts to graph nodes
-5. Re-score candidates via QueryEngine
-6. Compute differentiators
-7. Evaluate phase transition
-8. Build system prompt from session state
-9. Call renderer LLM
+3. Record turn + apply extraction to session (OLDCARTS, medications, supplements)
+4. Map concepts to graph nodes + resolve to intake KG SymptomProfile IDs
+5. Build `TraversalContext` from session state (filled OLDCARTS, candidates, active profiles, visited questions)
+6. `IntakeEngine::next_turn()` → `TurnAction` (which question to ask, which graph actions to fire, stage transition)
+7. `GraphActionExecutor::execute()` → `ActionResults` (candidates, discriminators, interactions, adverse matches, mechanisms)
+8. Update session: convert executor candidates to `CandidateSet`, record visited questions/goal counts, apply stage transition, escalate lens
+9. `build_context_v2()` → system prompt with graph-driven task instruction + call renderer LLM
 10. Post-generation safety filter → return result
+
+The key difference from v1: the intake KG engine decides what to ask (step 6) and the executor queries the supplement KG (step 7). The LLM only renders the engine's output as natural conversation. The old hardcoded phase logic (`phase::evaluate_transition`, `differentiator::compute_differentiators`, `candidates::score_candidates`) is replaced by the engine/executor pair.
 
 ### Session Management
 
