@@ -86,6 +86,10 @@ pub async fn find_gaps(graph: &KnowledgeGraph, nutraceutical: &str) -> Vec<Gap> 
             let is_terminal = match data.node_type {
                 NodeType::System => incoming.iter().any(|(_, e)| e.edge_type == EdgeType::ActsOn),
                 NodeType::Property => incoming.iter().any(|(_, e)| e.edge_type == EdgeType::Affords),
+                NodeType::Condition => incoming.iter().any(|(_, e)| e.edge_type == EdgeType::ContraindicatedWith),
+                NodeType::Pathway | NodeType::BiologicalProcess => {
+                    incoming.iter().any(|(_, e)| e.edge_type == EdgeType::ViaMechanism)
+                }
                 _ => false,
             };
 
@@ -120,6 +124,79 @@ pub async fn find_gaps(graph: &KnowledgeGraph, nutraceutical: &str) -> Vec<Gap> 
     }
 
     gaps
+}
+
+// ---------------------------------------------------------------------------
+// Coverage metrics — structural completeness per ingredient
+//
+// At minimum, a well-described ingredient should have:
+//   - At least one acts_on edge (what system does it affect?)
+//   - At least one via_mechanism edge (how does it work?)
+//   - At least one affords edge (what does it enable?)
+//
+// Missing any of these means the graph is structurally incomplete
+// for that ingredient, regardless of what the gap analyzer says.
+// ---------------------------------------------------------------------------
+
+/// Which structural requirements an ingredient is missing
+#[derive(Debug, Clone)]
+pub struct CoverageReport {
+    pub ingredient: String,
+    pub has_acts_on: bool,
+    pub has_via_mechanism: bool,
+    pub has_affords: bool,
+}
+
+impl CoverageReport {
+    /// True if all minimum structural requirements are met
+    pub fn is_complete(&self) -> bool {
+        self.has_acts_on && self.has_via_mechanism && self.has_affords
+    }
+
+    /// Human-readable list of what's missing
+    pub fn missing(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.has_acts_on {
+            missing.push("acts_on (no body system connected)");
+        }
+        if !self.has_via_mechanism {
+            missing.push("via_mechanism (no mechanism explaining how it works)");
+        }
+        if !self.has_affords {
+            missing.push("affords (no therapeutic property connected)");
+        }
+        missing
+    }
+}
+
+/// Check structural completeness for all ingredients in the graph.
+pub async fn coverage_check(graph: &KnowledgeGraph) -> Vec<CoverageReport> {
+    let ingredients = graph.nodes_by_type(&NodeType::Ingredient).await;
+    let mut reports = Vec::new();
+
+    for idx in &ingredients {
+        let data = match graph.node_data(idx).await {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let outgoing = graph.outgoing_edges(idx).await;
+
+        let has_acts_on = outgoing.iter().any(|(_, e)| e.edge_type == EdgeType::ActsOn);
+        let has_via_mechanism = outgoing
+            .iter()
+            .any(|(_, e)| e.edge_type == EdgeType::ViaMechanism);
+        let has_affords = outgoing.iter().any(|(_, e)| e.edge_type == EdgeType::Affords);
+
+        reports.push(CoverageReport {
+            ingredient: data.name.clone(),
+            has_acts_on,
+            has_via_mechanism,
+            has_affords,
+        });
+    }
+
+    reports
 }
 
 #[cfg(test)]
@@ -254,5 +331,37 @@ mod tests {
 
         // Ingredient itself should never show up as a gap
         assert!(gaps.iter().all(|g| g.node_name != "magnesium"));
+    }
+
+    #[tokio::test]
+    async fn test_coverage_complete_ingredient() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        let sys = graph.add_node(NodeData::new("muscular system", NodeType::System)).await;
+        let mech = graph.add_node(NodeData::new("calcium antagonism", NodeType::Mechanism)).await;
+        let prop = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property)).await;
+
+        graph.add_edge(&mag, &sys, EdgeData::new(EdgeType::ActsOn, EdgeMetadata::extracted(0.7, 1, 0))).await;
+        graph.add_edge(&mag, &mech, EdgeData::new(EdgeType::ViaMechanism, EdgeMetadata::extracted(0.7, 1, 0))).await;
+        graph.add_edge(&mag, &prop, EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0))).await;
+
+        let reports = coverage_check(&graph).await;
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].is_complete(), "fully connected ingredient should be complete");
+    }
+
+    #[tokio::test]
+    async fn test_coverage_missing_mechanism() {
+        let graph = KnowledgeGraph::in_memory().await.unwrap();
+        let mag = graph.add_node(NodeData::new("magnesium", NodeType::Ingredient)).await;
+        let sys = graph.add_node(NodeData::new("muscular system", NodeType::System)).await;
+        let prop = graph.add_node(NodeData::new("muscle relaxation", NodeType::Property)).await;
+
+        graph.add_edge(&mag, &sys, EdgeData::new(EdgeType::ActsOn, EdgeMetadata::extracted(0.7, 1, 0))).await;
+        graph.add_edge(&mag, &prop, EdgeData::new(EdgeType::Affords, EdgeMetadata::extracted(0.7, 1, 0))).await;
+
+        let reports = coverage_check(&graph).await;
+        assert!(!reports[0].is_complete());
+        assert!(reports[0].missing().iter().any(|m| m.contains("via_mechanism")));
     }
 }

@@ -57,6 +57,60 @@ pub struct EdgeObservation {
     pub correlation_id: String,
 }
 
+/// A PubMed citation backing a specific edge, sourced from SuppKG.
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+pub struct CitationRecord {
+    /// Our graph's source node name
+    pub source_node: String,
+    /// Our graph's target node name
+    pub target_node: String,
+    /// Our graph's edge type
+    pub edge_type: String,
+    /// PubMed ID
+    pub pmid: String,
+    /// Supporting sentence from the abstract
+    pub sentence: String,
+    /// SuppKG's confidence for this citation
+    pub confidence: f64,
+    /// The SuppKG predicate that matched (e.g. AFFECTS, STIMULATES)
+    pub suppkg_predicate: String,
+    /// CUI that matched our source node
+    pub source_cui: String,
+    /// CUI that matched our target node
+    pub target_cui: String,
+}
+
+#[derive(Debug, Clone, SurrealValue)]
+struct CitationRecordWithId {
+    #[allow(dead_code)]
+    id: surrealdb_types::RecordId,
+    pub source_node: String,
+    pub target_node: String,
+    pub edge_type: String,
+    pub pmid: String,
+    pub sentence: String,
+    pub confidence: f64,
+    pub suppkg_predicate: String,
+    pub source_cui: String,
+    pub target_cui: String,
+}
+
+impl From<CitationRecordWithId> for CitationRecord {
+    fn from(r: CitationRecordWithId) -> Self {
+        Self {
+            source_node: r.source_node,
+            target_node: r.target_node,
+            edge_type: r.edge_type,
+            pmid: r.pmid,
+            sentence: r.sentence,
+            confidence: r.confidence,
+            suppkg_predicate: r.suppkg_predicate,
+            source_cui: r.source_cui,
+            target_cui: r.target_cui,
+        }
+    }
+}
+
 /// Returned from the select (has SurrealDB's auto-generated id)
 #[derive(Debug, Clone, SurrealValue)]
 struct EdgeObservationWithId {
@@ -282,6 +336,92 @@ impl SourceStore {
         counts.into_iter().next().map(|c| c.count).unwrap_or(0)
     }
 
+    /// Classify all observed edges by quality tier.
+    ///
+    /// Quality is derived from source observations:
+    /// - Deduced: only `system:forward_chain` observations
+    /// - Speculative: only `StructurallyEmergent` source tags
+    /// - SingleProvider: extracted by exactly one LLM provider
+    /// - MultiProvider: extracted by 2+ independent LLM providers
+    pub async fn edges_by_quality(&self) -> Vec<EdgeWithQuality> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT source_node, target_node, edge_type, \
+                 array::distinct(provider) AS providers, \
+                 array::distinct(source_tag) AS source_tags, \
+                 count() AS total_obs \
+                 FROM edge_source \
+                 GROUP BY source_node, target_node, edge_type",
+            )
+            .await
+            .unwrap();
+        let records: Vec<QualityGroupedEdge> = result.take(0).unwrap_or_default();
+
+        // Build set of edges that have citations
+        let cited: std::collections::HashSet<(String, String, String)> = self
+            .all_citations()
+            .await
+            .into_iter()
+            .map(|c| (c.source_node, c.target_node, c.edge_type))
+            .collect();
+
+        records
+            .into_iter()
+            .map(|r| {
+                // Filter out system providers to count real LLM providers
+                let llm_providers: Vec<&String> = r
+                    .providers
+                    .iter()
+                    .filter(|p| !p.starts_with("system:"))
+                    .collect();
+
+                let has_citation = cited.contains(&(
+                    r.source_node.clone(),
+                    r.target_node.clone(),
+                    r.edge_type.clone(),
+                ));
+
+                let quality = if has_citation {
+                    EdgeQuality::CitationBacked
+                } else if llm_providers.len() >= 2 {
+                    EdgeQuality::MultiProvider
+                } else if llm_providers.len() == 1 {
+                    // Check if this is purely speculative
+                    let all_speculative = r.source_tags.iter().all(|t| {
+                        t == "StructurallyEmergent" || t == "Confirmed"
+                    });
+                    if all_speculative {
+                        EdgeQuality::Speculative
+                    } else {
+                        EdgeQuality::SingleProvider
+                    }
+                } else {
+                    // Only system providers (forward chain)
+                    EdgeQuality::Deduced
+                };
+
+                EdgeWithQuality {
+                    source_node: r.source_node,
+                    target_node: r.target_node,
+                    edge_type: r.edge_type,
+                    quality,
+                    provider_count: llm_providers.len(),
+                    total_observations: r.total_obs,
+                }
+            })
+            .collect()
+    }
+
+    /// Get all edges at or above a given quality tier.
+    pub async fn edges_at_quality(&self, min_quality: EdgeQuality) -> Vec<EdgeWithQuality> {
+        self.edges_by_quality()
+            .await
+            .into_iter()
+            .filter(|e| e.quality >= min_quality)
+            .collect()
+    }
+
     /// Get all edges that have been observed by multiple providers.
     pub async fn multi_provider_edges(&self) -> Vec<MultiProviderEdge> {
         // Get distinct (source, target, edge_type, provider) combinations
@@ -307,6 +447,79 @@ impl SourceStore {
             })
             .collect()
     }
+
+    // -- Citation methods -----------------------------------------------------
+
+    /// Record a PubMed citation backing a specific edge.
+    pub async fn record_citation(&self, citation: &CitationRecord) {
+        let _: Result<Option<CitationRecord>, _> = self
+            .db
+            .create("edge_citation")
+            .content(citation.clone())
+            .await;
+    }
+
+    /// Get all citations for a specific edge.
+    pub async fn citations_for_edge(
+        &self,
+        source_node: &str,
+        target_node: &str,
+        edge_type: &str,
+    ) -> Vec<CitationRecord> {
+        let results: Vec<CitationRecordWithId> = self
+            .db
+            .query(
+                "SELECT * FROM edge_citation WHERE source_node = $src AND target_node = $tgt AND edge_type = $et",
+            )
+            .bind(("src", source_node.to_lowercase()))
+            .bind(("tgt", target_node.to_lowercase()))
+            .bind(("et", edge_type.to_string()))
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap_or_default();
+
+        results.into_iter().map(CitationRecord::from).collect()
+    }
+
+    /// Get all citations in the store.
+    pub async fn all_citations(&self) -> Vec<CitationRecord> {
+        let results: Vec<CitationRecordWithId> = self
+            .db
+            .query("SELECT * FROM edge_citation")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap_or_default();
+
+        results.into_iter().map(CitationRecord::from).collect()
+    }
+
+    /// Count total citations.
+    pub async fn citation_count(&self) -> usize {
+        let results: Vec<CountResult> = self
+            .db
+            .query("SELECT count() AS count FROM edge_citation GROUP ALL")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap_or_default();
+
+        results.first().map(|r| r.count).unwrap_or(0)
+    }
+
+    /// Count unique edges that have at least one citation.
+    pub async fn cited_edge_count(&self) -> usize {
+        let results: Vec<CountResult> = self
+            .db
+            .query("SELECT count() AS count FROM (SELECT source_node, target_node, edge_type FROM edge_citation GROUP BY source_node, target_node, edge_type)")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap_or_default();
+
+        results.first().map(|r| r.count).unwrap_or(0)
+    }
 }
 
 #[derive(Debug, SurrealValue)]
@@ -322,6 +535,16 @@ struct GroupedEdge {
     providers: Vec<String>,
 }
 
+#[derive(Debug, SurrealValue)]
+struct QualityGroupedEdge {
+    source_node: String,
+    target_node: String,
+    edge_type: String,
+    providers: Vec<String>,
+    source_tags: Vec<String>,
+    total_obs: usize,
+}
+
 /// An edge that has been independently observed by multiple providers.
 #[derive(Debug, Clone)]
 pub struct MultiProviderEdge {
@@ -329,6 +552,53 @@ pub struct MultiProviderEdge {
     pub target_node: String,
     pub edge_type: String,
     pub providers: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Edge quality tiers
+//
+// Quality is derived from source observations, not stored on the edge itself.
+// The graph topology stays complete; consumers query the source layer to
+// filter by quality when they need to.
+// ---------------------------------------------------------------------------
+
+/// Quality tier for an edge, derived from its source observations.
+/// Ordered from weakest to strongest evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EdgeQuality {
+    /// Deduced by forward chaining from other edges (no direct observation)
+    Deduced,
+    /// Inferred from graph topology, validated by LLM (speculative)
+    Speculative,
+    /// Extracted by a single LLM provider
+    SingleProvider,
+    /// Extracted by multiple independent LLM providers
+    MultiProvider,
+    /// Backed by at least one PubMed citation via SuppKG
+    CitationBacked,
+}
+
+impl EdgeQuality {
+    pub fn label(&self) -> &'static str {
+        match self {
+            EdgeQuality::Deduced => "deduced",
+            EdgeQuality::Speculative => "speculative",
+            EdgeQuality::SingleProvider => "single_provider",
+            EdgeQuality::MultiProvider => "multi_provider",
+            EdgeQuality::CitationBacked => "citation_backed",
+        }
+    }
+}
+
+/// An edge with its computed quality tier
+#[derive(Debug, Clone)]
+pub struct EdgeWithQuality {
+    pub source_node: String,
+    pub target_node: String,
+    pub edge_type: String,
+    pub quality: EdgeQuality,
+    pub provider_count: usize,
+    pub total_observations: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -523,5 +793,126 @@ mod tests {
 
         assert_eq!(store.total_node_observations().await, 2);
         assert_eq!(store.total_edge_observations().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_edges_by_quality_single_provider() {
+        let store = make_store().await;
+        let now = Utc::now();
+
+        store
+            .record_edge_created(
+                "magnesium", "muscular system", "acts_on", 0.7, "Extracted",
+                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
+            )
+            .await;
+
+        let edges = store.edges_by_quality().await;
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].quality, EdgeQuality::SingleProvider);
+        assert_eq!(edges[0].provider_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_edges_by_quality_multi_provider() {
+        let store = make_store().await;
+        let now = Utc::now();
+
+        store
+            .record_edge_created(
+                "magnesium", "muscular system", "acts_on", 0.7, "Extracted",
+                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
+            )
+            .await;
+        store
+            .record_edge_confirmed(
+                "magnesium", "muscular system", "acts_on",
+                "gemini", "gemini-flash", Uuid::new_v4(), now,
+            )
+            .await;
+
+        let edges = store.edges_by_quality().await;
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].quality, EdgeQuality::MultiProvider);
+        assert_eq!(edges[0].provider_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_edges_by_quality_speculative() {
+        let store = make_store().await;
+        let now = Utc::now();
+
+        store
+            .record_edge_created(
+                "magnesium", "immune support", "affords", 0.5, "StructurallyEmergent",
+                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
+            )
+            .await;
+
+        let edges = store.edges_by_quality().await;
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].quality, EdgeQuality::Speculative);
+    }
+
+    #[tokio::test]
+    async fn test_edges_by_quality_deduced() {
+        let store = make_store().await;
+        let now = Utc::now();
+
+        store
+            .record_edge_created(
+                "magnesium", "muscle relaxation", "affords", 0.7, "Deduced",
+                "system:forward_chain", "forward_chain", Uuid::new_v4(), now,
+            )
+            .await;
+
+        let edges = store.edges_by_quality().await;
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].quality, EdgeQuality::Deduced);
+    }
+
+    #[tokio::test]
+    async fn test_edges_at_quality_filters() {
+        let store = make_store().await;
+        let now = Utc::now();
+
+        // Deduced edge
+        store
+            .record_edge_created(
+                "magnesium", "muscle relaxation", "affords", 0.7, "Deduced",
+                "system:forward_chain", "forward_chain", Uuid::new_v4(), now,
+            )
+            .await;
+
+        // Single-provider extracted edge
+        store
+            .record_edge_created(
+                "magnesium", "muscular system", "acts_on", 0.7, "Extracted",
+                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
+            )
+            .await;
+
+        // Multi-provider edge
+        store
+            .record_edge_created(
+                "zinc", "immune system", "acts_on", 0.7, "Extracted",
+                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
+            )
+            .await;
+        store
+            .record_edge_confirmed(
+                "zinc", "immune system", "acts_on",
+                "gemini", "gemini-flash", Uuid::new_v4(), now,
+            )
+            .await;
+
+        // Filter: at least SingleProvider
+        let filtered = store.edges_at_quality(EdgeQuality::SingleProvider).await;
+        assert_eq!(filtered.len(), 2, "should include single + multi, not deduced");
+
+        // Filter: only MultiProvider
+        let multi = store.edges_at_quality(EdgeQuality::MultiProvider).await;
+        assert_eq!(multi.len(), 1);
+        assert_eq!(multi[0].source_node, "zinc");
     }
 }

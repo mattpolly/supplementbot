@@ -178,6 +178,30 @@ pub enum PipelineEvent {
         /// Which model confirmed this edge
         model: String,
     },
+
+    // -- Synonym resolution ------------------------------------------------
+
+    /// Synonym resolution pass results
+    SynonymResolution {
+        /// How many nodes were matched to CUIs
+        cuis_assigned: usize,
+        /// How many alias pairs were detected
+        aliases_found: usize,
+    },
+
+    // -- Citation backing --------------------------------------------------
+
+    /// Citation backing pass results
+    CitationBacking {
+        /// Number of graph edges checked for SuppKG matches
+        edges_checked: usize,
+        /// Number of edges that received at least one citation
+        edges_backed: usize,
+        /// Total PubMed citations stored
+        citations_stored: usize,
+        /// Sample of citations (edge → PMID) for the log
+        sample: Vec<CitationRef>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +262,16 @@ pub enum ReviewVerdict {
     Contested,
     /// LLMs reject the claim
     Rejected,
+}
+
+/// A citation reference for event logging
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CitationRef {
+    pub source_node: String,
+    pub target_node: String,
+    pub edge_type: String,
+    pub pmid: String,
+    pub suppkg_predicate: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

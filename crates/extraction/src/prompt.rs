@@ -141,6 +141,13 @@ fn parse_node_type(s: &str) -> Result<NodeType, String> {
         "symptom" => Ok(NodeType::Symptom),
         "substrate" => Ok(NodeType::Substrate),
         "receptor" => Ok(NodeType::Receptor),
+        "pathway" => Ok(NodeType::Pathway),
+        "biologicalprocess" | "biological_process" => Ok(NodeType::BiologicalProcess),
+        "condition" => Ok(NodeType::Condition),
+        "metabolite" => Ok(NodeType::Metabolite),
+        "geneprotein" | "gene_protein" | "gene" | "protein" => Ok(NodeType::GeneProtein),
+        "celltype" | "cell_type" | "cell" => Ok(NodeType::CellType),
+        "microbiota" | "microbiome" => Ok(NodeType::Microbiota),
         other => Err(format!("unknown node type: \"{}\"", other)),
     }
 }
@@ -170,6 +177,19 @@ fn parse_edge_type(s: &str) -> Result<EdgeType, String> {
 /// If a lens is provided, triples using node types or edge types outside
 /// the lens are rejected with a warning. This is the enforcement layer —
 /// even if the LLM ignores the prompt constraints, the parser catches it.
+/// Nodes that are too generic to be useful in the graph. LLMs produce these
+/// when they're being vague — "body" is not a real system, it's a catch-all
+/// that becomes a supernode polluting every traversal path.
+const BANNED_SYSTEM_NAMES: &[&str] = &["body", "human body", "the body", "whole body"];
+
+fn is_banned_node(name: &str, node_type: &NodeType) -> bool {
+    if *node_type == NodeType::System {
+        BANNED_SYSTEM_NAMES.contains(&name.to_lowercase().as_str())
+    } else {
+        false
+    }
+}
+
 pub fn parse_triples(raw: &str, lens: Option<&ComplexityLens>) -> (Vec<RawTriple>, Vec<String>) {
     let mut triples = Vec::new();
     let mut warnings = Vec::new();
@@ -221,6 +241,17 @@ pub fn parse_triples(raw: &str, lens: Option<&ComplexityLens>) -> (Vec<RawTriple
                     warnings.push(format!(
                         "invalid type pair {:?}→{:?} for edge {:?}, skipping: \"{}\"",
                         triple.subject_type, triple.object_type, triple.edge_type, line
+                    ));
+                    continue;
+                }
+
+                // Supernode filter: reject overly generic nodes that pollute traversal
+                if is_banned_node(&triple.subject_name, &triple.subject_type)
+                    || is_banned_node(&triple.object_name, &triple.object_type)
+                {
+                    warnings.push(format!(
+                        "banned generic node detected, skipping: \"{}\"",
+                        line
                     ));
                     continue;
                 }
@@ -497,5 +528,32 @@ magnesium|Ingredient|affords|f|Property";
         let prompt = extraction_system(&lens, &[]);
 
         assert!(!prompt.contains("Existing graph nodes"));
+    }
+
+    #[test]
+    fn test_banned_node_body_filtered() {
+        let raw = "magnesium|Ingredient|acts_on|body|System";
+        let (triples, warnings) = parse_triples(raw, None);
+
+        assert!(triples.is_empty(), "body as System should be filtered");
+        assert!(warnings.iter().any(|w| w.contains("banned generic node")));
+    }
+
+    #[test]
+    fn test_banned_node_human_body_filtered() {
+        let raw = "zinc|Ingredient|acts_on|human body|System";
+        let (triples, warnings) = parse_triples(raw, None);
+
+        assert!(triples.is_empty());
+        assert!(warnings.iter().any(|w| w.contains("banned generic node")));
+    }
+
+    #[test]
+    fn test_banned_node_allows_real_systems() {
+        let raw = "magnesium|Ingredient|acts_on|muscular system|System";
+        let (triples, warnings) = parse_triples(raw, None);
+
+        assert_eq!(triples.len(), 1);
+        assert!(warnings.is_empty());
     }
 }

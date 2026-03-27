@@ -149,6 +149,25 @@ impl KnowledgeGraph {
         records.into_iter().map(|r| NodeIndex(r.id)).collect()
     }
 
+    /// Find a node by name, falling back to alias resolution if not found directly.
+    pub async fn find_node_or_alias(
+        &self,
+        name: &str,
+        merge: &crate::merge::MergeStore,
+    ) -> Option<NodeIndex> {
+        // Try direct lookup first
+        if let Some(idx) = self.find_node(name).await {
+            return Some(idx);
+        }
+        // Resolve through aliases and try the canonical name
+        let canonical = merge.resolve(name).await;
+        if canonical != name.to_lowercase() {
+            self.find_node(&canonical).await
+        } else {
+            None
+        }
+    }
+
     // -- Edge operations --------------------------------------------------
 
     /// Add an edge between two nodes. Does not deduplicate — caller is responsible.
@@ -202,11 +221,108 @@ impl KnowledgeGraph {
             .collect()
     }
 
+    /// Total degree (incoming + outgoing) for a node.
+    pub async fn node_degree(&self, idx: &NodeIndex) -> usize {
+        let mut result = self
+            .db
+            .query("SELECT count() FROM edge WHERE in = $node OR out = $node GROUP ALL")
+            .bind(("node", idx.0.clone()))
+            .await
+            .unwrap();
+        let count: Option<CountResult> = result.take(0).unwrap_or_default();
+        count.map(|c| c.count).unwrap_or(0)
+    }
+
+    /// Update the confidence of all edges matching (source, target, edge_type).
+    /// Adds `boost` to the existing confidence, capped at 1.0.
+    /// Returns the number of edges updated.
+    pub async fn boost_edge_confidence(
+        &self,
+        source: &NodeIndex,
+        target: &NodeIndex,
+        edge_type: &EdgeType,
+        boost: f64,
+    ) -> usize {
+        // SurrealDB graph relations: `in` = source, `out` = target
+        // We need to find matching edges, update them, and count
+        let edges = self.outgoing_edges(source).await;
+        let mut updated = 0;
+
+        for (tgt, data) in &edges {
+            if *tgt == *target && data.edge_type == *edge_type {
+                let new_confidence = (data.metadata.confidence + boost).min(1.0);
+                let _: surrealdb::Result<Vec<EdgeRecordWithId>> = self
+                    .db
+                    .query(
+                        "UPDATE edge SET metadata.confidence = $conf \
+                         WHERE in = $from AND out = $to AND edge_type = $et",
+                    )
+                    .bind(("conf", new_confidence))
+                    .bind(("from", source.0.clone()))
+                    .bind(("to", target.0.clone()))
+                    .bind(("et", edge_type.clone()))
+                    .await
+                    .and_then(|mut r| r.take(0));
+                updated += 1;
+            }
+        }
+
+        updated
+    }
+
     /// Iterate over all node indices
     pub async fn all_nodes(&self) -> Vec<NodeIndex> {
         let records: Vec<NodeRecordWithId> =
             self.db.select("node").await.unwrap_or_default();
         records.into_iter().map(|r| NodeIndex(r.id)).collect()
+    }
+
+    /// Get all edges in the graph as (source, target, edge_data) triples.
+    pub async fn all_edges(&self) -> Vec<(NodeIndex, NodeIndex, EdgeData)> {
+        let mut result = self
+            .db
+            .query("SELECT *, in AS source, out AS target FROM edge")
+            .await
+            .unwrap();
+
+        let records: Vec<EdgeRecordWithId> = result.take(0).unwrap_or_default();
+        records
+            .into_iter()
+            .map(|r| {
+                let edge_data = EdgeData::new(r.edge_type, r.metadata);
+                (NodeIndex(r.source), NodeIndex(r.target), edge_data)
+            })
+            .collect()
+    }
+
+    /// Set the confidence of all edges matching (source, target, edge_type)
+    /// to an exact value. Returns the number of edges updated.
+    pub async fn set_edge_confidence(
+        &self,
+        source: &NodeIndex,
+        target: &NodeIndex,
+        edge_type: &EdgeType,
+        confidence: f64,
+    ) -> usize {
+        let _: surrealdb::Result<Vec<EdgeRecordWithId>> = self
+            .db
+            .query(
+                "UPDATE edge SET metadata.confidence = $conf \
+                 WHERE in = $from AND out = $to AND edge_type = $et",
+            )
+            .bind(("conf", confidence.clamp(0.0, 1.0)))
+            .bind(("from", source.0.clone()))
+            .bind(("to", target.0.clone()))
+            .bind(("et", edge_type.clone()))
+            .await
+            .and_then(|mut r| r.take(0));
+        // We don't get a reliable count from SurrealDB UPDATE on relations,
+        // so check by re-reading
+        let edges = self.outgoing_edges(source).await;
+        edges
+            .iter()
+            .filter(|(t, d)| *t == *target && d.edge_type == *edge_type)
+            .count()
     }
 
     // -- Graph stats ------------------------------------------------------

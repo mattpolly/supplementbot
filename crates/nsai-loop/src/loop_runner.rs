@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use event_log::events::{
     CurriculumStage, GapInfo, PipelineEvent, TokenUsage as EventTokenUsage,
 };
@@ -5,9 +7,11 @@ use event_log::sink::EventSink;
 use extraction::parser::ExtractionParser;
 use graph_service::graph::KnowledgeGraph;
 use graph_service::lens::ComplexityLens;
+use graph_service::merge::MergeStore;
 use graph_service::source::SourceStore;
 use graph_service::types::Source;
 use llm_client::provider::{CompletionRequest, LlmProvider};
+use suppkg::SuppKg;
 use uuid::Uuid;
 
 use crate::analyzer;
@@ -15,6 +19,7 @@ use crate::comprehension;
 use crate::forward_chain;
 use crate::prompts;
 use crate::speculative;
+use crate::synonym;
 
 // ---------------------------------------------------------------------------
 // Loop configuration
@@ -28,6 +33,8 @@ pub struct LoopConfig {
     pub max_gaps_per_iteration: usize,
     /// Max structural observations to validate with the LLM (0 = skip speculative)
     pub max_speculative_observations: usize,
+    /// Max times to ask about a node that produces no new edges before skipping it
+    pub max_stale_gap_attempts: u32,
 }
 
 impl Default for LoopConfig {
@@ -36,6 +43,7 @@ impl Default for LoopConfig {
             max_gap_iterations: 3,
             max_gaps_per_iteration: 5,
             max_speculative_observations: 3,
+            max_stale_gap_attempts: 2,
         }
     }
 }
@@ -49,6 +57,8 @@ impl Default for LoopConfig {
 pub struct LoopResult {
     pub iterations: u32,
     pub total_gaps_filled: usize,
+    pub synonym_cuis_assigned: usize,
+    pub synonym_aliases_found: usize,
     pub deduced_chains: usize,
     pub deduced_edges_added: usize,
     pub comprehension_edges_confirmed: usize,
@@ -69,6 +79,8 @@ pub struct NsaiLoop<'a> {
     config: LoopConfig,
     lens: ComplexityLens,
     source_store: Option<&'a SourceStore>,
+    suppkg: Option<&'a SuppKg>,
+    merge_store: Option<&'a MergeStore>,
 }
 
 impl<'a> NsaiLoop<'a> {
@@ -79,6 +91,8 @@ impl<'a> NsaiLoop<'a> {
             config: LoopConfig::default(),
             lens: ComplexityLens::default(),
             source_store: None,
+            suppkg: None,
+            merge_store: None,
         }
     }
 
@@ -94,6 +108,16 @@ impl<'a> NsaiLoop<'a> {
 
     pub fn with_source_store(mut self, store: &'a SourceStore) -> Self {
         self.source_store = Some(store);
+        self
+    }
+
+    pub fn with_synonym_resolution(
+        mut self,
+        suppkg: &'a SuppKg,
+        merge_store: &'a MergeStore,
+    ) -> Self {
+        self.suppkg = Some(suppkg);
+        self.merge_store = Some(merge_store);
         self
     }
 
@@ -148,10 +172,24 @@ impl<'a> NsaiLoop<'a> {
         }
 
         // ── Step 2: Gap-filling loop ───────────────────────────────────────
+        // Track how many times a node has been asked about without producing new edges.
+        // Nodes that hit the stale limit are skipped — diminishing returns.
+        let mut stale_counts: HashMap<String, u32> = HashMap::new();
+
         for i in 1..=self.config.max_gap_iterations {
             iteration = i;
 
-            let gaps = analyzer::find_gaps(graph, nutraceutical).await;
+            let all_gaps = analyzer::find_gaps(graph, nutraceutical).await;
+
+            // Filter out stale gaps (asked too many times with no results)
+            let gaps: Vec<_> = all_gaps
+                .into_iter()
+                .filter(|g| {
+                    let count = stale_counts.get(&g.node_name).copied().unwrap_or(0);
+                    count < self.config.max_stale_gap_attempts
+                })
+                .collect();
+
             if gaps.is_empty() {
                 break;
             }
@@ -178,6 +216,8 @@ impl<'a> NsaiLoop<'a> {
             let gaps_this_round = gaps.len().min(self.config.max_gaps_per_iteration);
 
             for gap in gaps.iter().take(self.config.max_gaps_per_iteration) {
+                let edges_before_gap = graph.edge_count().await;
+
                 let question = prompts::gap_question(nutraceutical, gap);
 
                 let request = CompletionRequest::new(&question)
@@ -232,6 +272,15 @@ impl<'a> NsaiLoop<'a> {
                         );
                     }
                 }
+
+                // Track whether this gap produced new edges
+                let edges_after_gap = graph.edge_count().await;
+                if edges_after_gap == edges_before_gap {
+                    *stale_counts.entry(gap.node_name.clone()).or_insert(0) += 1;
+                } else {
+                    // Produced results — reset stale counter
+                    stale_counts.remove(&gap.node_name);
+                }
             }
 
             total_gaps_filled += gaps_this_round;
@@ -258,10 +307,28 @@ impl<'a> NsaiLoop<'a> {
             }
         }
 
+        // ── Step 2.5: Synonym resolution ─────────────────────────────────
+        let mut synonym_cuis_assigned = 0;
+        let mut synonym_aliases_found = 0;
+
+        if let (Some(suppkg), Some(merge)) = (self.suppkg, self.merge_store) {
+            let syn_result = synonym::run_synonym_resolution(
+                graph,
+                suppkg,
+                merge,
+                correlation_id,
+                self.sink,
+            )
+            .await;
+            synonym_cuis_assigned = syn_result.cuis_assigned;
+            synonym_aliases_found = syn_result.aliases_found;
+        }
+
         // ── Step 3: Forward chaining (symbolic deduction) ─────────────────
         let chain_result = forward_chain::run_forward_chaining(
             self.sink,
             graph,
+            self.source_store,
             correlation_id,
         )
         .await;
@@ -320,6 +387,8 @@ impl<'a> NsaiLoop<'a> {
         LoopResult {
             iterations: iteration,
             total_gaps_filled,
+            synonym_cuis_assigned,
+            synonym_aliases_found,
             deduced_chains: chain_result.chains_found,
             deduced_edges_added: chain_result.edges_added,
             comprehension_edges_confirmed: comp.edges_confirmed,
@@ -500,6 +569,7 @@ mod tests {
             max_gap_iterations: 1,
             max_gaps_per_iteration: 2,
             max_speculative_observations: 0,
+            ..Default::default()
         };
         let nsai = NsaiLoop::new(&provider, &sink).with_config(config);
         let graph = KnowledgeGraph::in_memory().await.unwrap();

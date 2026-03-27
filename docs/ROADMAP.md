@@ -41,6 +41,22 @@ This chain of reasoning is what distinguishes the system from a lookup table and
 - Ranking likely comes from: edge confidence scores, mechanism specificity, and number of independent paths converging on the same ingredient
 - Don't build this now; the traversal is free, the ranking is where the real complexity lives
 
+## Traversal Path Preference Across Complexity Levels
+
+When the graph contains both a simple 5th-grade edge and a detailed graduate-level decomposition of the same relationship, the traversal algorithm must choose which path to follow. Example: `magnesium → affords → sleep quality` (1-hop, 5th grade) vs. `magnesium → acts_on → NMDA receptor → via_mechanism → GABAergic inhibition → affords → sleep quality` (3-hop, graduate).
+
+**Design:** The complexity lens already solves the easy case — at low complexity, graduate-level intermediate nodes are invisible, so only the simple path survives. At high complexity, both paths are visible and the algorithm should prefer the longer, more detailed path (specificity preference). The consumer wants the mechanistic decomposition, not the shortcut.
+
+**Implementation strategy (when building the query/intake layer):**
+1. Find all paths between endpoints (bounded by max hops)
+2. Filter out paths where any intermediate node is below the current complexity threshold
+3. Among surviving paths, prefer the one with the most intermediate nodes (richest explanation)
+4. Use epoch as a secondary tiebreaker — higher-epoch edges are more refined
+
+**UI opportunity:** When both a simple and detailed path exist, the interface can offer progressive disclosure: show the simple explanation first, with a "see mechanism" expand option that reveals the full chain.
+
+See also: CONCERNS.md §6 for the full problem statement and escape hatches.
+
 ## Ingredient-to-Ingredient Edges (Synergy/Stacks)
 
 Real-world formulations (e.g., Bluebonnet Super Quercetin) contain ingredients that interact with *each other*, not just with body systems:
@@ -84,6 +100,26 @@ The graph owns topology; a parallel relational layer in SurrealDB (same embedded
 **Framing:** The current graph is a **speculative KG** — built from LLM extraction with no external validation. When edges are confirmed via PubMed, external KGs (NP-KG, SuppKG), or clinical data, they graduate to a future **proven KG**. The source tables enable this distinction: edges with only LLM observations are speculative; edges with literature citations are proven.
 
 Graph confidence becomes a computed aggregate over source rows rather than a one-time assignment. Two providers independently extracting the same edge is stronger evidence than one — this is the path to real cross-provider validation.
+
+### Edge Quality Tiers via Source Layer (Built — 2026-03-22)
+
+**Decision:** Edge quality (speculative vs. confirmed vs. proven) is computed from source observations, not stored as a separate field on the edge. The graph topology stays complete — no "quarantine table" or separate speculative/proven graphs. Instead, consumers query the source layer with a minimum quality threshold.
+
+**Quality tiers (weakest → strongest):**
+
+| Tier | Criteria | Example |
+|------|----------|---------|
+| `Deduced` | Only `system:forward_chain` observations | Forward-chained `affords` shortcut |
+| `Speculative` | Only `StructurallyEmergent` source tags from a single LLM | Topology-driven observation validated by one provider |
+| `SingleProvider` | `Extracted` by exactly one LLM provider | Anthropic extracted `magnesium → acts_on → nervous system` |
+| `MultiProvider` | `Extracted` by 2+ independent providers | Both Anthropic and Gemini extracted the same edge |
+| `CitationBacked` | (future) Confirmed by PubMed or external KG | Edge has a literature citation in the `citations` table |
+
+**Query API:**
+- `edges_by_quality()` — classify all edges by tier
+- `edges_at_quality(min)` — filter to edges at or above a threshold
+
+**Why not a quarantine table?** The whole graph is speculative right now (all LLM-sourced). A separate quarantine table would split the topology, making traversal harder and requiring promotion logic. The source layer already tracks provenance — quality is a derived property, not stored state. When the intake/chat layer is built, it filters by `edges_at_quality(SingleProvider)` or higher. When PubMed extraction arrives, `CitationBacked` edges are simply those with rows in the `citations` table.
 
 ### Merge Table for Synonym Resolution
 

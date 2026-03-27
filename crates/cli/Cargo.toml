@@ -16,6 +16,7 @@ extraction = { path = "../extraction" }
 graph-service = { path = "../graph-service" }
 serde_json = "1"
 nsai-loop = { path = "../nsai-loop" }
+suppkg = { path = "../suppkg" }
 llm-client = { path = "../llm-client", features = ["mock"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }

@@ -39,6 +39,21 @@ pub enum NodeType {
     Substrate,
     /// A molecular target (e.g. "NMDA receptor", "L-type calcium channel")
     Receptor,
+    /// A named biological pathway (e.g. "calcium absorption pathway", "mevalonate pathway")
+    Pathway,
+    /// A named biological process (e.g. "inflammation", "oxidative phosphorylation")
+    BiologicalProcess,
+    /// A disease or medical condition disclosed by the user (e.g. "hemophilia", "diabetes")
+    /// NEVER surfaced in recommendations — used only for contraindication safety filtering
+    Condition,
+    /// A biochemical intermediate distinct from a substrate (e.g. "5-HTP", "homocysteine")
+    Metabolite,
+    /// A gene or protein target (e.g. "MTHFR", "COX-2", "cytochrome P450")
+    GeneProtein,
+    /// A cell type involved in supplement interactions (e.g. "T-cell", "macrophage")
+    CellType,
+    /// A microorganism in the gut or body microbiome (e.g. "Lactobacillus", "Bifidobacterium")
+    Microbiota,
 }
 
 impl NodeType {
@@ -50,7 +65,14 @@ impl NodeType {
             NodeType::Mechanism => 0.0,
             NodeType::Symptom => 0.0,
             NodeType::Property => 0.0,
+            NodeType::Condition => 0.3,
             NodeType::Substrate => 0.4,
+            NodeType::Pathway => 0.5,
+            NodeType::BiologicalProcess => 0.5,
+            NodeType::Metabolite => 0.5,
+            NodeType::GeneProtein => 0.7,
+            NodeType::CellType => 0.7,
+            NodeType::Microbiota => 0.7,
             NodeType::Receptor => 0.7,
         }
     }
@@ -63,7 +85,14 @@ impl NodeType {
             NodeType::Mechanism,
             NodeType::Symptom,
             NodeType::Property,
+            NodeType::Condition,
             NodeType::Substrate,
+            NodeType::Pathway,
+            NodeType::BiologicalProcess,
+            NodeType::Metabolite,
+            NodeType::GeneProtein,
+            NodeType::CellType,
+            NodeType::Microbiota,
             NodeType::Receptor,
         ]
     }
@@ -194,6 +223,13 @@ impl EdgeType {
     /// The denylist catches only the semantically nonsensical cases.
     pub fn is_invalid_pair(&self, source: &NodeType, target: &NodeType) -> bool {
         use NodeType::*;
+
+        // Condition nodes can ONLY be the target of contraindicated_with.
+        // This is the structural defense preventing medical claims in the graph.
+        if matches!(source, Condition) || matches!(target, Condition) {
+            return !matches!(self, EdgeType::ContraindicatedWith);
+        }
+
         match self {
             // presents_in is strictly Symptom → System
             EdgeType::PresentsIn => {
@@ -220,7 +256,7 @@ impl EdgeType {
             EdgeType::ViaMechanism => "via_mechanism: Ingredient → Mechanism, or Mechanism → Mechanism",
             EdgeType::Affords => "affords: Ingredient → Property, or Mechanism → Property",
             EdgeType::PresentsIn => "presents_in: Symptom → System",
-            EdgeType::Modulates => "modulates: adjusts sensitivity of a System or Mechanism (gain control)",
+            EdgeType::Modulates => "modulates: Mechanism → System or Mechanism → Mechanism (e.g. \"NMDA receptor modulation modulates nervous system\")",
             EdgeType::ContraindicatedWith => "contraindicated_with: should not be combined with",
             EdgeType::CompetesWith => "competes_with: molecules competing for the same binding site",
             EdgeType::Disinhibits => "disinhibits: removes an inhibitor, increasing downstream activity",
@@ -230,6 +266,30 @@ impl EdgeType {
             EdgeType::Desensitizes => "desensitizes: prolonged exposure reduces sensitivity",
             EdgeType::PositivelyReinforces => "positively_reinforces: output feeds back to increase its own input",
             EdgeType::Gates => "gates: all-or-nothing activation above a threshold",
+        }
+    }
+}
+
+impl std::str::FromStr for EdgeType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "acts_on" => Ok(EdgeType::ActsOn),
+            "via_mechanism" => Ok(EdgeType::ViaMechanism),
+            "affords" => Ok(EdgeType::Affords),
+            "presents_in" => Ok(EdgeType::PresentsIn),
+            "modulates" => Ok(EdgeType::Modulates),
+            "contraindicated_with" => Ok(EdgeType::ContraindicatedWith),
+            "competes_with" => Ok(EdgeType::CompetesWith),
+            "disinhibits" => Ok(EdgeType::Disinhibits),
+            "sequesters" => Ok(EdgeType::Sequesters),
+            "releases" => Ok(EdgeType::Releases),
+            "amplifies" => Ok(EdgeType::Amplifies),
+            "desensitizes" => Ok(EdgeType::Desensitizes),
+            "positively_reinforces" => Ok(EdgeType::PositivelyReinforces),
+            "gates" => Ok(EdgeType::Gates),
+            other => Err(format!("unknown edge type: \"{}\"", other)),
         }
     }
 }
@@ -302,13 +362,19 @@ pub struct EdgeMetadata {
     pub epoch: u32,
     /// Per-LLM confidence scores (populated during review pipeline)
     pub llm_agreement: Option<LlmAgreement>,
+    /// How many layers of reasoning produced this edge.
+    /// 0 = directly extracted from LLM, 1 = deduced from extracted edges,
+    /// 2 = speculated from deduced edges, etc. Used to prevent
+    /// speculation-on-deduction cascades.
+    #[serde(default)]
+    pub reasoning_depth: u32,
     /// Open map for future dimensions (dosage, delivery method, etc.)
     #[serde(default)]
     pub extra: HashMap<String, MetadataValue>,
 }
 
 impl EdgeMetadata {
-    /// Create metadata for a freshly extracted edge
+    /// Create metadata for a freshly extracted edge (depth 0)
     pub fn extracted(confidence: Confidence, iteration: u32, epoch: u32) -> Self {
         Self {
             confidence,
@@ -316,11 +382,13 @@ impl EdgeMetadata {
             iteration,
             epoch,
             llm_agreement: None,
+            reasoning_depth: 0,
             extra: HashMap::new(),
         }
     }
 
-    /// Create metadata for a structurally emergent edge (speculative inference)
+    /// Create metadata for a structurally emergent edge (speculative inference).
+    /// Depth is 1 by default — speculated from extracted premises.
     pub fn emergent(confidence: Confidence, iteration: u32, epoch: u32) -> Self {
         Self {
             confidence,
@@ -328,11 +396,13 @@ impl EdgeMetadata {
             iteration,
             epoch,
             llm_agreement: None,
+            reasoning_depth: 1,
             extra: HashMap::new(),
         }
     }
 
-    /// Create metadata for a deduced edge (symbolic forward chaining)
+    /// Create metadata for a deduced edge (symbolic forward chaining).
+    /// `premise_depth` should be the max reasoning_depth of the premise edges.
     pub fn deduced(confidence: Confidence, iteration: u32, epoch: u32) -> Self {
         Self {
             confidence,
@@ -340,6 +410,25 @@ impl EdgeMetadata {
             iteration,
             epoch,
             llm_agreement: None,
+            reasoning_depth: 1,
+            extra: HashMap::new(),
+        }
+    }
+
+    /// Create deduced metadata with an explicit depth derived from premises.
+    pub fn deduced_with_depth(
+        confidence: Confidence,
+        iteration: u32,
+        epoch: u32,
+        premise_max_depth: u32,
+    ) -> Self {
+        Self {
+            confidence,
+            source: Source::Deduced,
+            iteration,
+            epoch,
+            llm_agreement: None,
+            reasoning_depth: premise_max_depth + 1,
             extra: HashMap::new(),
         }
     }

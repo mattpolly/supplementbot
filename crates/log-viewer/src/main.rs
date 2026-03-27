@@ -14,7 +14,7 @@ struct Cli {
     #[arg(short, long)]
     correlation: Option<String>,
 
-    /// Only show events of this type (request, response, error, extraction, claim, review, mutation)
+    /// Only show events of this type (request, response, error, extraction, claim, review, mutation, citation)
     #[arg(short, long)]
     filter: Option<String>,
 }
@@ -99,6 +99,8 @@ fn matches_filter(event: &PipelineEvent, filter: &str) -> bool {
         ),
         "gap" => matches!(event, PipelineEvent::GapAnalysis { .. }),
         "comprehension" => matches!(event, PipelineEvent::ComprehensionCheck { .. }),
+        "citation" => matches!(event, PipelineEvent::CitationBacking { .. }),
+        "synonym" => matches!(event, PipelineEvent::SynonymResolution { .. }),
         _ => true,
     }
 }
@@ -359,6 +361,36 @@ fn print_event(envelope: &EventEnvelope, base_time: DateTime<Utc>) {
                 secs, iteration, phase, gaps_found,
                 nodes_before, nodes_after, edges_before, edges_after, corr_short
             );
+            println!();
+        }
+        PipelineEvent::SynonymResolution {
+            cuis_assigned,
+            aliases_found,
+        } => {
+            println!(
+                "  [{:>8.3}s] ── \x1b[35mSYNONYM\x1b[0m ── {} CUIs assigned, {} aliases found ({})",
+                secs, cuis_assigned, aliases_found, corr_short
+            );
+            println!();
+        }
+
+        PipelineEvent::CitationBacking {
+            edges_checked,
+            edges_backed,
+            citations_stored,
+            sample,
+        } => {
+            println!(
+                "  [{:>8.3}s] ── \x1b[32mCITATION\x1b[0m ── {} checked, {} backed, {} citations ({})",
+                secs, edges_checked, edges_backed, citations_stored, corr_short
+            );
+            for cite in sample {
+                println!(
+                    "              {} ──[{}]──▶ {} via {} (PMID:{})",
+                    cite.source_node, cite.edge_type, cite.target_node,
+                    cite.suppkg_predicate, cite.pmid
+                );
+            }
             println!();
         }
     }

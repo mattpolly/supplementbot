@@ -12,6 +12,11 @@ Deep dive into how Supplementbot works, crate by crate.
 - [LLM Client](#llm-client)
 - [Extraction Pipeline](#extraction-pipeline)
 - [NSAI Loop](#nsai-loop)
+- [Query Engine](#query-engine)
+- [Merge Table](#merge-table)
+- [Intake Knowledge Graph](#intake-knowledge-graph)
+- [Intake Agent](#intake-agent)
+- [Web Server](#web-server)
 - [Event System](#event-system)
 - [Curriculum Agent](#curriculum-agent)
 - [Design Decisions](#design-decisions)
@@ -24,16 +29,34 @@ Deep dive into how Supplementbot works, crate by crate.
 
 The ontology defines the vocabulary the system can reason about. Every node and edge has a type, and every type has a minimum complexity threshold.
 
-### Node Types (7)
+### Node Types (14)
 
+Organized into three complexity tiers:
+
+**Foundational (0.0–0.3)** — Core vocabulary available at all levels
 | Type | Min Complexity | Description |
 |------|---------------|-------------|
 | `Ingredient` | 0.0 | The supplement itself |
 | `System` | 0.0 | A body system (nervous, muscular, etc.) |
-| `Mechanism` | 0.1 | A biological process or pathway |
+| `Mechanism` | 0.0 | A specific biological action (calcium channel blocking, NMDA receptor modulation) |
 | `Property` | 0.0 | A therapeutic effect (muscle relaxation, sleep quality) |
-| `Symptom` | 0.1 | A physiological sign (cramps, fatigue) |
+| `Symptom` | 0.0 | A physiological sign (cramps, fatigue) |
+| `Condition` | 0.3 | A disease or medical condition — ONLY used for contraindication safety filtering, never surfaced in output |
+
+**Intermediate (0.4–0.5)** — 10th grade and above
+| Type | Min Complexity | Description |
+|------|---------------|-------------|
 | `Substrate` | 0.4 | A signaling molecule, ion, or hormone (calcium, serotonin) |
+| `Pathway` | 0.5 | A named biological pathway (calcium absorption pathway, mevalonate pathway) |
+| `BiologicalProcess` | 0.5 | A named biological process (inflammation, oxidative stress) |
+| `Metabolite` | 0.5 | A biochemical intermediate (5-HTP, homocysteine, methylfolate) |
+
+**Advanced (0.7)** — College level and above
+| Type | Min Complexity | Description |
+|------|---------------|-------------|
+| `GeneProtein` | 0.7 | A gene or protein target (MTHFR, COX-2, cytochrome P450) |
+| `CellType` | 0.7 | A cell type (T-cell, macrophage, osteoblast) |
+| `Microbiota` | 0.7 | A gut or body microorganism (Lactobacillus, Bifidobacterium) |
 | `Receptor` | 0.7 | A molecular target (NMDA receptor, calcium channel) |
 
 ### Edge Types (14)
@@ -110,8 +133,8 @@ pub fn can_see_edge(&self, edge_type: &EdgeType) -> bool {
 | Preset | Level | Visible Edges | Visible Nodes |
 |--------|-------|---------------|---------------|
 | `fifth_grade()` | 0.15 | 5 foundational | 5 basic |
-| `tenth_grade()` | 0.50 | 8 (+ intermediate) | 6 (+ Substrate) |
-| `college()` | 0.80 | 12 (+ advanced) | 7 (+ Receptor) |
+| `tenth_grade()` | 0.50 | 8 (+ intermediate) | 10 (+ Condition, Substrate, Pathway, BiologicalProcess, Metabolite) |
+| `college()` | 0.80 | 12 (+ advanced) | 14 (+ GeneProtein, CellType, Microbiota, Receptor) |
 | `graduate()` | 1.00 | 14 (all) | 7 (all) |
 
 Custom values work: `ComplexityLens::new(0.35)` sees `contraindicated_with` (0.3) but not `competes_with` (0.4).
@@ -148,7 +171,17 @@ All graph operations are **async** since they hit the embedded database.
 | `nodes_by_type(&NodeType)` | Filter nodes by type |
 | `all_nodes()` | All node indices for iteration |
 | `node_count()` / `edge_count()` | Graph size via `SELECT count() GROUP ALL` |
+| `boost_edge_confidence(&src, &tgt, &type, boost)` | Increase confidence on matching edges (capped at 1.0) |
 | `dump()` | Human-readable graph dump |
+
+**Source layer queries** (via `SourceStore`, same DB):
+
+| Method | Description |
+|--------|-------------|
+| `edges_by_quality()` | Classify all edges by quality tier (Deduced → Speculative → SingleProvider → MultiProvider) |
+| `edges_at_quality(min)` | Filter to edges at or above a quality threshold |
+| `multi_provider_edges()` | All edges confirmed by 2+ providers |
+| `provider_agreement(src, tgt, type)` | Full observation details for any edge |
 
 Nodes are deduplicated by slugified lowercase name (spaces → underscores, non-alphanumeric stripped). Edges are deduplicated by (source, target, edge_type) in the extraction parser, not in the graph itself.
 
@@ -181,13 +214,14 @@ pub trait LlmProvider: Send + Sync {
 
 ### Providers
 
-| Provider | Env Var |
-|----------|---------|
-| Mock | — (always available) |
-| Anthropic Claude | `ANTHROPIC_API_KEY` |
-| Google Gemini | `GEMINI_API_KEY` |
+| Provider | Env Var | Model Env |
+|----------|---------|-----------|
+| Mock | — (always available) | — |
+| Anthropic Claude | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` |
+| Google Gemini | `GEMINI_API_KEY` | `GEMINI_MODEL` |
+| xAI / Grok | `XAI_API_KEY` | `XAI_MODEL` |
 
-All providers are compiled unconditionally (no feature flags). The CLI selects via `--provider anthropic|gemini|mock`.
+All providers are compiled unconditionally (no feature flags). The CLI selects via `--provider anthropic|gemini|grok|xai|mock`. The `grok` and `xai` aliases are equivalent. The xAI provider uses an OpenAI-compatible API format.
 
 The mock provider uses substring matching for test determinism:
 
@@ -358,6 +392,204 @@ This is Level 2 of three planned reasoning levels:
 1. **Structured query** — database lookup (done)
 2. **Topological observation** — graph examines its own structure (done)
 3. **LLM-validated inference** — structural observations sent back to LLM for validation (future)
+
+---
+
+## Query Engine
+
+**Crate:** `graph-service` — `crates/graph-service/src/query.rs`
+
+Pattern-based graph traversal with lens filtering, quality scoring, and recommendation ranking. Built per three-model consensus (Claude, Gemini, Grok — 2026-03-24).
+
+### Traversal Patterns
+
+Two structured patterns (not generic BFS):
+
+- **DirectSystem**: `Symptom →[presents_in]→ System ←[acts_on]← Ingredient`
+- **ViaMechanism**: `Symptom →[presents_in]→ System ←[modulates]← Mechanism ←[via_mechanism]← Ingredient`
+
+### Scoring
+
+```
+path_score = geometric_mean(confidences) × quality_bonus(weakest_link) × length_bias(lens, len)
+```
+
+| Quality Tier | Bonus |
+|---|---|
+| Deduced | 0.5 |
+| Speculative | 0.7 |
+| SingleProvider | 1.0 |
+| MultiProvider | 1.2 |
+| CitationBacked | 1.5 |
+
+Length bias: penalizes length at low lens (users want simple answers), rewards length at high lens (users want mechanistic detail).
+
+### Key Types
+
+- `QueryEngine` — created with eager quality map (single DB call at construction)
+- `QueryConfig` — lens, min_quality, max_depth (default 4), min_confidence, max_paths_per_result (default 3)
+- `RecommendationResult` — grouped by ingredient: paths, best_score, weakest_quality, contraindications
+- `EffectResult` — grouped by destination node
+
+### Query Methods
+
+- `ingredients_for_symptom(symptom, config)` — core recommendation query
+- `ingredients_for_system(system, config)` — reverse acts_on lookup
+- `effects_of_ingredient(ingredient, config)` — forward BFS with cycle detection
+
+Contraindications proactively attached to all recommendation results.
+
+---
+
+## Merge Table
+
+**Crate:** `graph-service` — `crates/graph-service/src/merge.rs`
+
+Non-destructive synonym resolution. Both nodes stay in the graph; queries resolve through aliases.
+
+### Records
+
+- `AliasRecord` — canonical name, alias name, confidence (0.0–1.0), method, timestamp
+- `CuiRecord` — node name, UMLS CUI, confidence, method
+
+### Operations
+
+- `record_alias(canonical, alias, confidence, method)` — deduplicates; updates if new confidence is higher
+- `resolve(text)` → canonical name (or original text if no alias)
+- `find_node_or_alias(text, merge)` → tries exact match then alias resolution
+
+Tables: `node_alias`, `node_cui` in SurrealDB. Run before inference, not after.
+
+---
+
+## Intake Knowledge Graph
+
+**Crate:** `graph-service` — `crates/graph-service/src/intake/`
+
+A second knowledge graph encoding **process knowledge** (how to interview a patient) as opposed to the supplement KG's **domain knowledge** (what we know about supplements). Shares the same SurrealDB instance with `intake_`-prefixed tables.
+
+See [INTAKE_KG.md](INTAKE_KG.md) for full design rationale.
+
+### Modules
+
+| Module | Purpose |
+|---|---|
+| `types.rs` | Full type system: stages, questions, goals, exit conditions, symptom profiles, archetypes, clusters, graph actions, edge types |
+| `store.rs` | SurrealDB persistence (CRUD for all node types) |
+| `seed.rs` | Idempotent bootstrap data (6 stages, archetypes, goals, questions, exit conditions, edges) |
+| `engine.rs` | Stateless traversal engine — determines next action via Expected Information Gain (EIG) scoring |
+| `executor.rs` | Bridge to supplement KG — dispatches graph actions (QueryCandidates, CheckInteractions, FetchMechanism, etc.) |
+| `idisk.rs` | iDISK 2.0 CSV importer (392 symptoms, 7,876 ingredients, 214 drugs, 172 diseases, interaction/adverse reaction edges) |
+
+### Node Types
+
+**Process nodes:** IntakeStage (6 phases), QuestionTemplate (parameterized), ClinicalGoal, ExitCondition
+
+**Domain-bridge nodes:** SymptomProfile (with UMLS CUI + iDISK aliases), ArchetypeProfile (symptom group templates), SymptomCluster (co-occurring patterns), SystemReviewNode, GraphActionNode
+
+### Edge Types (14)
+
+HasStage, Asks, Fulfills, FallsBack, RelevantFor, IrrelevantFor, BelongsTo, CoOccurs, Suggests, Triggers, ExitsWhen, EscalatesTo, Probes, HasGoal
+
+Each edge carries `IntakeEdgeMeta`: priority (0.0–1.0), required, safety_gate, max_asks, optional condition.
+
+### Traversal
+
+The engine is stateless — takes a `TraversalContext` snapshot (current stage, active symptom profiles, filled OLDCARTS, visited questions, candidate info) and returns a `TurnAction` (question to ask, optional stage transition, debug trace).
+
+Question selection uses Expected Information Gain (EIG): `priority × information_gain × system_relevance`. The LLM never decides what to ask — the graph decides, the LLM renders.
+
+### Integration Status
+
+- Types, store, seed, engine, executor, iDISK importer: **implemented**
+- Wired into web-server handler: **not yet** (build_context_v2 exists but handler still calls v1)
+- iDISK data loaded into real DB: **not yet**
+- Seed data loaded into running instance: **not yet**
+
+---
+
+## Intake Agent
+
+**Crate:** `intake-agent` — `crates/intake-agent/src/`
+
+Clinical reasoning engine for the conversational supplement intake interview.
+
+### Modules
+
+| Module | Purpose |
+|---|---|
+| `session.rs` | Session state: phase, chief complaints, OLDCARTS data, system reviews, candidates, lens level, turn history |
+| `phase.rs` | Phase transition logic + user signal detection (Engaged, Disengaged, WantsRecommendations, Correction, DoneSharing) |
+| `context.rs` | LLM system prompt builder (v1: hardcoded tasks; v2: graph-driven from TurnAction output) |
+| `candidates.rs` | Candidate ranking: intersection gate → sum scores → coverage bonus → negative evidence penalty → contraindication elimination |
+| `safety.rs` | Red flag ejector (~20 emergency keywords) + post-generation regex filter (blocks diagnosis/cure language) |
+| `differentiator.rs` | Finds discriminating questions between candidates via depth-aware graph walk; entropy-scored |
+| `concept_map.rs` | Free-text → graph node mapping (exact match + alias + merge table; embedding/LLM tiers are future) |
+
+### Phase Machine
+
+Five phases: ChiefComplaint → Hpi → ReviewOfSystems → Differentiation → Recommendation
+
+Key gates:
+- Medication/supplement disclosure required before any recommendation
+- Auto-recommend when top candidate >30% ahead of #2 AND ≥3 OLDCARTS dimensions filled
+- `DoneSharing` signal detection for early phase transitions
+
+### Safety (Three Layers)
+
+1. **Red flag ejector** — pattern matches emergency keywords (chest pain, suicidal, etc.); blocks normal flow
+2. **Prompt constraints** — system prompt enforces "research suggests..." framing, never prescriptive
+3. **Post-generation filter** — regex blacklist catches diagnosis patterns, "cure", dosage prescriptions
+
+---
+
+## Web Server
+
+**Crate:** `web-server` — `crates/web-server/src/`
+
+Axum-based WebSocket server hosting the intake agent.
+
+### Routes
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/ws/chat` | GET (upgrade) | WebSocket chat endpoint |
+| `/api/health` | GET | Health check |
+| `/api/stats` | GET | Session statistics |
+| `/*` | GET | Static file serving (HTML/JS frontend) |
+
+### Shared State (`AppState`)
+
+- `graph: KnowledgeGraph` — supplement KG (persisted to disk)
+- `source: SourceStore` — edge quality metadata
+- `merge: MergeStore` — synonym resolution
+- `renderer: Arc<dyn LlmProvider>` — expensive conversational LLM (env: RENDERER_PROVIDER/RENDERER_MODEL)
+- `extractor: Arc<dyn LlmProvider>` — cheap extraction LLM (env: EXTRACTOR_PROVIDER/EXTRACTOR_MODEL)
+- `sessions: SessionManager` — rate limiting and session tracking
+- `safety_filter: SafetyFilter` — compiled regex patterns
+
+### Turn Pipeline (10 steps)
+
+1. Red flag check (no graph, no LLM needed)
+2. Extract structured data via cheap extractor LLM
+3. Record turn, apply extraction to session
+4. Map concepts to graph nodes
+5. Re-score candidates via QueryEngine
+6. Compute differentiators
+7. Evaluate phase transition
+8. Build system prompt from session state
+9. Call renderer LLM
+10. Post-generation safety filter → return result
+
+### Session Management
+
+Rate limits: max concurrent sessions, daily cap, monthly cap, session timeout. Counter resets per calendar day/month.
+
+### WebSocket Protocol
+
+JSON messages:
+- **Client → Server:** `{ "type": "message", "text": "..." }`
+- **Server → Client:** `welcome` (session_id), `response` (text + phase + candidates), `emergency`, `denied`, `typing`
 
 ---
 

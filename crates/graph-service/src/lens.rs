@@ -99,10 +99,17 @@ impl ComplexityLens {
             let desc = match nt {
                 NodeType::Ingredient => "Ingredient: the supplement itself",
                 NodeType::System => "System: a body system (e.g. nervous system, muscular system)",
-                NodeType::Mechanism => "Mechanism: a biological process or pathway",
+                NodeType::Mechanism => "Mechanism: a specific biological action (e.g. calcium channel blocking, NMDA receptor modulation)",
                 NodeType::Symptom => "Symptom: a physiological sign (e.g. muscle cramps, fatigue)",
                 NodeType::Property => "Property: a therapeutic effect or quality (e.g. muscle relaxation)",
+                NodeType::Condition => "Condition: a disease or medical condition (e.g. hemophilia, diabetes) — use ONLY for contraindication safety",
                 NodeType::Substrate => "Substrate: a signaling molecule, ion, or hormone (e.g. calcium, serotonin)",
+                NodeType::Pathway => "Pathway: a named biological pathway (e.g. calcium absorption pathway, mevalonate pathway)",
+                NodeType::BiologicalProcess => "BiologicalProcess: a named biological process (e.g. inflammation, oxidative stress, immune response)",
+                NodeType::Metabolite => "Metabolite: a biochemical intermediate (e.g. 5-HTP, homocysteine, methylfolate)",
+                NodeType::GeneProtein => "GeneProtein: a gene or protein target (e.g. MTHFR, COX-2, cytochrome P450)",
+                NodeType::CellType => "CellType: a cell type (e.g. T-cell, macrophage, osteoblast)",
+                NodeType::Microbiota => "Microbiota: a gut or body microorganism (e.g. Lactobacillus, Bifidobacterium)",
                 NodeType::Receptor => "Receptor: a molecular target (e.g. NMDA receptor, calcium channel)",
             };
             lines.push(format!("- {}", desc));
