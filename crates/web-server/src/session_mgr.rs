@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use chrono::{Datelike, Local};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -12,8 +13,8 @@ use intake_agent::session::IntakeSession;
 //
 // Rate limits ($100/month budget protection):
 //   - max_concurrent: how many sessions can be active at once
-//   - daily_cap: max new sessions per day
-//   - monthly_cap: max new sessions per month
+//   - daily_cap: max new sessions per day (resets at wall-clock midnight)
+//   - monthly_cap: max new sessions per month (resets on the 1st)
 //   - session_timeout: auto-archive after inactivity
 // ---------------------------------------------------------------------------
 
@@ -30,9 +31,9 @@ pub struct SessionManager {
     session_timeout: Duration,
     daily_count: AtomicUsize,
     monthly_count: AtomicUsize,
-    /// Day/month markers for resetting counters
-    day_started: RwLock<Instant>,
-    month_started: RwLock<Instant>,
+    /// Wall-clock day/month markers for detecting rollovers
+    current_day: RwLock<u32>,   // day-of-month (1–31)
+    current_month: RwLock<u32>, // month (1–12)
 }
 
 /// Why a session could not be created.
@@ -69,6 +70,7 @@ impl SessionManager {
         monthly_cap: usize,
         session_timeout_secs: u64,
     ) -> Self {
+        let now = Local::now();
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_concurrent,
@@ -77,8 +79,8 @@ impl SessionManager {
             session_timeout: Duration::from_secs(session_timeout_secs),
             daily_count: AtomicUsize::new(0),
             monthly_count: AtomicUsize::new(0),
-            day_started: RwLock::new(Instant::now()),
-            month_started: RwLock::new(Instant::now()),
+            current_day: RwLock::new(now.day()),
+            current_month: RwLock::new(now.month()),
         }
     }
 
@@ -163,26 +165,27 @@ impl SessionManager {
         }
     }
 
-    /// Reset daily/monthly counters if enough time has elapsed.
+    /// Reset daily/monthly counters when the wall-clock day or month rolls over.
     async fn maybe_reset_counters(&self) {
-        let one_day = Duration::from_secs(86400);
-        let one_month = Duration::from_secs(86400 * 30);
+        let now = Local::now();
+        let today = now.day();
+        let this_month = now.month();
 
         {
-            let day = self.day_started.read().await;
-            if day.elapsed() > one_day {
-                drop(day);
+            let current = *self.current_day.read().await;
+            if current != today {
                 self.daily_count.store(0, Ordering::Relaxed);
-                *self.day_started.write().await = Instant::now();
+                *self.current_day.write().await = today;
+                eprintln!("[session_mgr] daily counter reset (new day: {today})");
             }
         }
 
         {
-            let month = self.month_started.read().await;
-            if month.elapsed() > one_month {
-                drop(month);
+            let current = *self.current_month.read().await;
+            if current != this_month {
                 self.monthly_count.store(0, Ordering::Relaxed);
-                *self.month_started.write().await = Instant::now();
+                *self.current_month.write().await = this_month;
+                eprintln!("[session_mgr] monthly counter reset (new month: {this_month})");
             }
         }
     }
