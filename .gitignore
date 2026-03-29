@@ -2,3 +2,4 @@
 .env
 *.jsonl
 /data/
+.claude/
