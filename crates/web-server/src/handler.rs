@@ -33,6 +33,16 @@ use crate::state::AppState;
 //  10. Post-generation safety filter
 // ---------------------------------------------------------------------------
 
+/// A single PubMed citation to surface in the UI.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CitationRef {
+    pub ingredient: String,
+    pub pmid: u64,
+    pub url: String,
+    pub sentence: String,
+    pub confidence: f64,
+}
+
 /// The result of processing one turn.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TurnResult {
@@ -46,6 +56,8 @@ pub struct TurnResult {
     pub complete: bool,
     /// Current candidate count (for UI)
     pub candidate_count: usize,
+    /// PubMed citations supporting the recommendation (populated at recommendation phase)
+    pub citations: Vec<CitationRef>,
 }
 
 /// Process one user message through the full pipeline.
@@ -71,6 +83,7 @@ pub async fn process_turn(
             emergency: true,
             complete: true,
             candidate_count: 0,
+            citations: vec![],
         });
     }
 
@@ -404,13 +417,90 @@ pub async fn process_turn(
         IntakePhase::Recommendation => "recommendation",
     };
 
+    // At recommendation phase, look up PubMed citations for each candidate.
+    let citations = if complete {
+        gather_citations(state, session_id).await
+    } else {
+        vec![]
+    };
+
     Some(TurnResult {
         response: safe_response,
         phase: phase_str.to_string(),
         emergency: false,
         complete,
         candidate_count,
+        citations,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Citation lookup
+// ---------------------------------------------------------------------------
+
+/// For each top candidate, resolve its CUI via the merge store and look up
+/// PubMed citations from SuppKG. Returns up to 3 citations per ingredient,
+/// sorted by confidence, deduped by PMID.
+async fn gather_citations(state: &AppState, session_id: &Uuid) -> Vec<CitationRef> {
+    let suppkg = match &state.inner.suppkg {
+        Some(kg) => kg.clone(),
+        None => return vec![],
+    };
+
+    let candidates: Vec<String> = match state.inner.sessions
+        .with_session(session_id, |session| {
+            session.candidates.top(10).iter().map(|c| c.ingredient.clone()).collect()
+        })
+        .await
+    {
+        Some(c) => c,
+        None => return vec![],
+    };
+
+    let mut result = Vec::new();
+
+    for ingredient in &candidates {
+        // Resolve ingredient name → CUI via merge store
+        let ingredient_cui = match state.inner.merge.cui_for(ingredient).await {
+            Some(cui) => cui,
+            None => {
+                // Fall back to SuppKG's own term index
+                match suppkg.resolve_cui(ingredient) {
+                    Some(m) => m.cui,
+                    None => continue,
+                }
+            }
+        };
+
+        // Get all outgoing edges from this ingredient CUI in SuppKG
+        let outgoing = suppkg.outgoing_edges(&ingredient_cui);
+
+        let mut seen_pmids = std::collections::HashSet::new();
+        let mut ingredient_citations: Vec<CitationRef> = Vec::new();
+
+        for (target_cui, _predicate) in outgoing {
+            let cites = suppkg.citations_for(&ingredient_cui, target_cui, None);
+            for cite in cites {
+                if cite.pmid == 0 { continue; }
+                if seen_pmids.contains(&cite.pmid) { continue; }
+                seen_pmids.insert(cite.pmid);
+                ingredient_citations.push(CitationRef {
+                    ingredient: ingredient.clone(),
+                    pmid: cite.pmid,
+                    url: format!("https://pubmed.ncbi.nlm.nih.gov/{}/", cite.pmid),
+                    sentence: cite.sentence.clone(),
+                    confidence: cite.confidence,
+                });
+            }
+        }
+
+        // Sort by confidence descending, take top 3 per ingredient
+        ingredient_citations.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        ingredient_citations.truncate(3);
+        result.extend(ingredient_citations);
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------

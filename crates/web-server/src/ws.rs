@@ -4,7 +4,7 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::handler::{self, TurnResult};
+use crate::handler::{self, CitationRef, TurnResult};
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
@@ -50,6 +50,8 @@ struct ServerMessage {
     complete: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_count: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    citations: Vec<CitationRef>,
 }
 
 impl ServerMessage {
@@ -62,6 +64,7 @@ impl ServerMessage {
             message: None,
             complete: None,
             candidate_count: None,
+            citations: vec![],
         }
     }
 
@@ -74,6 +77,7 @@ impl ServerMessage {
             message: None,
             complete: None,
             candidate_count: None,
+            citations: vec![],
         }
     }
 
@@ -86,6 +90,7 @@ impl ServerMessage {
             message: None,
             complete: None,
             candidate_count: None,
+            citations: vec![],
         }
     }
 
@@ -99,6 +104,7 @@ impl ServerMessage {
                 message: None,
                 complete: Some(true),
                 candidate_count: None,
+                citations: vec![],
             };
         }
         Self {
@@ -109,6 +115,7 @@ impl ServerMessage {
             message: None,
             complete: Some(result.complete),
             candidate_count: Some(result.candidate_count),
+            citations: result.citations.clone(),
         }
     }
 
@@ -121,6 +128,7 @@ impl ServerMessage {
             message: Some(reason.to_string()),
             complete: None,
             candidate_count: None,
+            citations: vec![],
         }
     }
 
@@ -133,6 +141,7 @@ impl ServerMessage {
             message: Some(msg.to_string()),
             complete: None,
             candidate_count: None,
+            citations: vec![],
         }
     }
 }
@@ -265,6 +274,7 @@ async fn generate_opening(state: &AppState, session_id: &Uuid) -> Option<TurnRes
         emergency: false,
         complete: false,
         candidate_count: 0,
+        citations: vec![],
     })
 }
 

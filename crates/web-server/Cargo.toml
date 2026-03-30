@@ -19,3 +19,4 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
+suppkg = { path = "../suppkg" }

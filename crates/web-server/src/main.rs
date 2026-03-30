@@ -49,12 +49,16 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(900); // 15 minutes
     let idisk_data_dir = std::env::var("IDISK_DATA_DIR").ok();
+    let suppkg_path = std::env::var("SUPPKG_PATH").ok();
 
     eprintln!("supplementbot-web starting...");
     eprintln!("  graph: {graph_path}");
     eprintln!("  static: {static_dir}");
     if let Some(ref dir) = idisk_data_dir {
         eprintln!("  iDISK: {dir}");
+    }
+    if let Some(ref p) = suppkg_path {
+        eprintln!("  SuppKG: {p}");
     }
     eprintln!("  limits: {max_concurrent} concurrent, {daily_cap}/day, {monthly_cap}/month");
     eprintln!("  session timeout: {session_timeout_secs}s");
@@ -63,6 +67,7 @@ async fn main() {
     let state = AppState::init(
         &graph_path,
         idisk_data_dir.as_deref(),
+        suppkg_path.as_deref(),
         max_concurrent,
         daily_cap,
         monthly_cap,

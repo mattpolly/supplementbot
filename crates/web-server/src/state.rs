@@ -9,6 +9,7 @@ use graph_service::merge::MergeStore;
 use graph_service::source::SourceStore;
 use intake_agent::safety::SafetyFilter;
 use llm_client::provider::LlmProvider;
+use suppkg::SuppKg;
 
 use crate::session_mgr::SessionManager;
 
@@ -40,12 +41,16 @@ pub struct AppStateInner {
     pub intake_store: IntakeGraphStore,
     /// iDISK importer (drug interactions, adverse reactions, mechanisms).
     pub idisk: IdiskImporter,
+    /// SuppKG — in-memory citation index (PubMed PMIDs + sentences).
+    /// None if SUPPKG_PATH is not set or file not found.
+    pub suppkg: Option<Arc<SuppKg>>,
 }
 
 impl AppState {
     pub async fn init(
         graph_path: &str,
         idisk_data_dir: Option<&str>,
+        suppkg_path: Option<&str>,
         max_concurrent: usize,
         daily_cap: usize,
         monthly_cap: usize,
@@ -88,6 +93,26 @@ impl AppState {
             }
         }
 
+        // Load SuppKG citation index if path is provided
+        let suppkg = suppkg_path.and_then(|p| {
+            let path = Path::new(p);
+            if path.exists() {
+                match SuppKg::load(p) {
+                    Ok(kg) => {
+                        eprintln!("  SuppKG loaded: {} nodes, {} edge pairs", kg.node_count(), kg.edge_pair_count());
+                        Some(Arc::new(kg))
+                    }
+                    Err(e) => {
+                        eprintln!("  SuppKG load failed: {e}");
+                        None
+                    }
+                }
+            } else {
+                eprintln!("  SuppKG path not found: {p} — citations unavailable");
+                None
+            }
+        });
+
         // Configure LLM providers from environment
         let renderer = build_renderer();
         let extractor = build_extractor();
@@ -129,6 +154,7 @@ impl AppState {
                 safety_filter,
                 intake_store,
                 idisk,
+                suppkg,
             }),
         }
     }

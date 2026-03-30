@@ -4180,6 +4180,7 @@ dependencies = [
  "llm-client",
  "serde",
  "serde_json",
+ "suppkg",
  "tokio",
  "tower-http",
  "uuid",
