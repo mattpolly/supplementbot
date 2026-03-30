@@ -1,11 +1,17 @@
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::handler::{self, TurnResult};
 use crate::state::AppState;
+
+#[derive(Deserialize, Default)]
+pub struct WsQuery {
+    #[serde(default)]
+    donor: bool,
+}
 
 // ---------------------------------------------------------------------------
 // WebSocket handler — one connection per patient session.
@@ -122,15 +128,16 @@ impl ServerMessage {
 /// Axum handler — upgrades HTTP to WebSocket.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
+    Query(query): Query<WsQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, query.donor))
 }
 
 /// Handle one WebSocket connection.
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
+async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
     // Try to create a session
-    let session_id = match state.inner.sessions.create_session().await {
+    let session_id = match state.inner.sessions.create_session(donor).await {
         Ok(id) => id,
         Err(denied) => {
             let msg = ServerMessage::denied(&denied.to_string());

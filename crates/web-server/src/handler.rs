@@ -339,9 +339,9 @@ pub async fn process_turn(
     let llm_request = CompletionRequest::new(&intake_context.user_message)
         .with_system(intake_context.system_prompt)
         .with_max_tokens(if new_phase == IntakePhase::Recommendation {
-            768
+            1024
         } else {
-            150
+            400
         })
         .with_temperature(0.6);
 

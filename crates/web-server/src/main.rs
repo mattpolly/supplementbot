@@ -35,15 +35,15 @@ async fn main() {
     let max_concurrent: usize = std::env::var("MAX_CONCURRENT_SESSIONS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
+        .unwrap_or(2);
     let daily_cap: usize = std::env::var("DAILY_SESSION_CAP")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(13);
+        .unwrap_or(10);
     let monthly_cap: usize = std::env::var("MONTHLY_SESSION_CAP")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(400);
+        .unwrap_or(100);
     let session_timeout_secs: u64 = std::env::var("SESSION_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())

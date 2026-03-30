@@ -85,25 +85,28 @@ impl SessionManager {
     }
 
     /// Try to create a new session. Returns the session ID or a denial reason.
-    pub async fn create_session(&self) -> Result<Uuid, SessionDenied> {
+    /// Donors bypass all caps as a thank-you for supporting the project.
+    pub async fn create_session(&self, donor: bool) -> Result<Uuid, SessionDenied> {
         self.maybe_reset_counters().await;
 
-        // Check monthly cap first (most restrictive)
-        if self.monthly_count.load(Ordering::Relaxed) >= self.monthly_cap {
-            return Err(SessionDenied::MonthlyLimitReached);
-        }
+        if !donor {
+            // Check monthly cap first (most restrictive)
+            if self.monthly_count.load(Ordering::Relaxed) >= self.monthly_cap {
+                return Err(SessionDenied::MonthlyLimitReached);
+            }
 
-        // Check daily cap
-        if self.daily_count.load(Ordering::Relaxed) >= self.daily_cap {
-            return Err(SessionDenied::DailyLimitReached);
-        }
+            // Check daily cap
+            if self.daily_count.load(Ordering::Relaxed) >= self.daily_cap {
+                return Err(SessionDenied::DailyLimitReached);
+            }
 
-        // Check concurrent limit
-        let sessions = self.sessions.read().await;
-        if sessions.len() >= self.max_concurrent {
-            return Err(SessionDenied::AtCapacity);
+            // Check concurrent limit
+            let sessions = self.sessions.read().await;
+            if sessions.len() >= self.max_concurrent {
+                return Err(SessionDenied::AtCapacity);
+            }
+            drop(sessions);
         }
-        drop(sessions);
 
         // Create the session
         let session = IntakeSession::new();

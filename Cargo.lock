@@ -4173,6 +4173,7 @@ name = "supplementbot-web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "dotenvy",
  "graph-service",
  "intake-agent",

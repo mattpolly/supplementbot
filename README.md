@@ -113,9 +113,9 @@ Connect via WebSocket at `ws://localhost:3000/ws/chat`. Health check at `GET /ap
 | `GRAPH_PATH` | `~/.supplementbot/graph` | SurrealDB database path |
 | `STATIC_DIR` | — | Static file directory for frontend |
 | `IDISK_DATA_DIR` | — | iDISK 2.0 data directory |
-| `MAX_CONCURRENT_SESSIONS` | `5` | Max simultaneous sessions |
-| `DAILY_SESSION_CAP` | `13` | Daily session limit |
-| `MONTHLY_SESSION_CAP` | `400` | Monthly session limit |
+| `MAX_CONCURRENT_SESSIONS` | `2` | Max simultaneous sessions |
+| `DAILY_SESSION_CAP` | `10` | Daily session limit |
+| `MONTHLY_SESSION_CAP` | `100` | Monthly session limit |
 | `SESSION_TIMEOUT_SECS` | `900` | Idle session timeout (15 min) |
 
 ### Run the CLI (NSAI Loop)
