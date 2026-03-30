@@ -1,3 +1,4 @@
+mod explore;
 mod extract;
 mod handler;
 mod session_mgr;
@@ -80,6 +81,25 @@ async fn main() {
         .route("/ws/chat", get(ws::ws_handler))
         .route("/api/health", get(handler::health))
         .route("/api/stats", get(handler::stats))
+        // Graph explorer
+        .route("/api/explore/graph/stats", get(explore::graph_stats))
+        .route("/api/explore/graph/nodes", get(explore::graph_nodes))
+        .route("/api/explore/graph/edges", get(explore::graph_edges))
+        .route("/api/explore/graph/node-aliases", get(explore::graph_node_aliases))
+        .route("/api/explore/graph/node-cuis", get(explore::graph_node_cuis))
+        .route("/api/explore/graph/edge-sources", get(explore::graph_edge_sources))
+        .route("/api/explore/graph/edge-citations", get(explore::graph_edge_citations))
+        // Relational explorer
+        .route("/api/explore/relational/stats", get(explore::relational_stats))
+        .route("/api/explore/relational/intake-stages", get(explore::intake_stages))
+        .route("/api/explore/relational/intake-archetypes", get(explore::intake_archetypes))
+        .route("/api/explore/relational/intake-symptom-profiles", get(explore::intake_symptom_profiles))
+        .route("/api/explore/relational/intake-questions", get(explore::intake_questions))
+        .route("/api/explore/relational/intake-clusters", get(explore::intake_clusters))
+        .route("/api/explore/relational/idisk-ingredients", get(explore::idisk_ingredients))
+        .route("/api/explore/relational/idisk-drugs", get(explore::idisk_drugs))
+        .route("/api/explore/relational/idisk-interactions", get(explore::idisk_interactions))
+        .route("/api/explore/relational/idisk-adverse", get(explore::idisk_adverse))
         .fallback_service(ServeDir::new(&static_dir))
         .layer(CorsLayer::permissive())
         .with_state(state);
