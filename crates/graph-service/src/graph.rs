@@ -72,6 +72,12 @@ impl KnowledgeGraph {
     pub async fn open(path: &str) -> Result<Self, surrealdb::Error> {
         let db = Surreal::new::<RocksDb>(path).await?;
         db.use_ns("supplementbot").use_db("graph").await?;
+        // Ensure the edge table is typed as a relation so that `in`/`out`
+        // are hydrated during full table scans (SurrealDB 3.0 requirement).
+        let _: surrealdb::Result<Vec<serde_json::Value>> = db
+            .query("DEFINE TABLE edge TYPE RELATION IN node OUT node")
+            .await
+            .and_then(|mut r| r.take(0));
         Ok(Self { db })
     }
 

@@ -60,7 +60,7 @@ pub async fn graph_edges(
     let db = state.inner.graph.db();
 
     let result: Result<Vec<Value>, _> = db
-        .query("SELECT *, in AS source, out AS target FROM edge LIMIT $limit START $offset")
+        .query("SELECT *, in, out FROM edge LIMIT $limit START $offset")
         .bind(("limit", limit))
         .bind(("offset", offset))
         .await
