@@ -202,6 +202,15 @@ impl SuppKg {
         result
     }
 
+    /// Get the first (canonical) term for a CUI, or the CUI itself if not found.
+    pub fn first_term_for<'a>(&'a self, cui: &'a str) -> &'a str {
+        self.cui_to_node
+            .get(cui)
+            .and_then(|n| n.terms.first())
+            .map(|s| s.as_str())
+            .unwrap_or(cui)
+    }
+
     /// Get semantic types for a CUI.
     pub fn semtypes_for(&self, cui: &str) -> Vec<String> {
         self.cui_to_node

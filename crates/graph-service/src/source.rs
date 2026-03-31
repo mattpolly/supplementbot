@@ -482,6 +482,20 @@ impl SourceStore {
         results.into_iter().map(CitationRecord::from).collect()
     }
 
+    /// Get all citations for a specific ingredient (by source_node name only).
+    pub async fn citations_for_ingredient(&self, ingredient: &str) -> Vec<CitationRecord> {
+        let results: Vec<CitationRecordWithId> = self
+            .db
+            .query("SELECT * FROM edge_citation WHERE source_node = $src ORDER BY confidence DESC")
+            .bind(("src", ingredient.to_lowercase()))
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap_or_default();
+
+        results.into_iter().map(CitationRecord::from).collect()
+    }
+
     /// Get all citations in the store.
     pub async fn all_citations(&self) -> Vec<CitationRecord> {
         let results: Vec<CitationRecordWithId> = self
