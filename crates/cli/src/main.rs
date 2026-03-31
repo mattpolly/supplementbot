@@ -76,6 +76,11 @@ struct Cli {
     /// Run citation backing only — no LLM calls. Requires SuppKG (--suppkg or SUPPKG_PATH env).
     #[arg(long)]
     cite_only: bool,
+
+    /// Resolve CUIs for all graph nodes from SuppKG, then exit — no LLM calls.
+    /// Run this before --cite-only if the graph was built without --suppkg.
+    #[arg(long)]
+    resolve_cuis: bool,
 }
 
 #[derive(Subcommand)]
@@ -518,6 +523,75 @@ async fn main() {
 
     // Create merge store for synonym resolution (shares DB with graph)
     let merge_store = MergeStore::new(graph.db());
+
+    // --resolve-cuis: populate merge store CUIs from SuppKG and exit (no LLM)
+    if cli.resolve_cuis {
+        let suppkg_dir = cli.suppkg.clone()
+            .or_else(|| {
+                std::env::var("SUPPKG_PATH").ok().map(|p| {
+                    std::path::Path::new(&p)
+                        .parent()
+                        .map(|d| d.to_string_lossy().to_string())
+                        .unwrap_or(p)
+                })
+            });
+
+        let dir = match suppkg_dir {
+            Some(d) => d,
+            None => {
+                eprintln!("--resolve-cuis requires SuppKG. Pass --suppkg <dir> or set SUPPKG_PATH.");
+                std::process::exit(1);
+            }
+        };
+
+        let json_path = format!("{}/supp_kg.json", dir);
+        let edgelist_path = format!("{}/suppkg_v2.edgelist", dir);
+
+        print!("  Loading SuppKG from {}/ ...", dir);
+        let kg_result = if std::path::Path::new(&edgelist_path).exists() {
+            SuppKg::load_with_edgelist(&json_path, &edgelist_path)
+        } else {
+            SuppKg::load(&json_path)
+        };
+
+        let kg = match kg_result {
+            Ok(kg) => {
+                println!(
+                    " {} nodes, {} terms, {} edge pairs",
+                    kg.node_count(), kg.term_count(), kg.edge_pair_count()
+                );
+                kg
+            }
+            Err(e) => {
+                eprintln!(" Error loading SuppKG: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let sink = match JsonlFileSink::new(&cli.output) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error creating event log: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        println!("  Resolving CUIs for all graph nodes ...");
+        let corr = Uuid::new_v4();
+        let result = nsai_loop::synonym::run_synonym_resolution(
+            &graph, &kg, &merge_store, corr, &sink,
+        ).await;
+
+        println!("─── CUI Resolution ─────────────────────────────────────");
+        println!(
+            "  {} CUIs assigned, {} aliases detected",
+            result.cuis_assigned, result.aliases_found
+        );
+        println!();
+
+        sink.flush().expect("Failed to flush event log");
+        return;
+    }
 
     // --cite-only: run citation backing against existing graph and exit
     if cli.cite_only {
