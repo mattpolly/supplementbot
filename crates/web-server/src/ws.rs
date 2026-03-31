@@ -175,9 +175,16 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
     // Send welcome (gives the frontend the session_id) then the opening greeting.
     let _ = send_json(&mut socket, &ServerMessage::welcome(&session_id)).await;
     let _ = send_json(&mut socket, &ServerMessage::typing()).await;
-    if let Some(opening) = generate_opening(&state, &session_id).await {
-        let _ = send_json(&mut socket, &ServerMessage::from_turn(&opening)).await;
-    }
+    let opening = generate_opening(&state, &session_id).await;
+    let opening_result = opening.unwrap_or_else(|| TurnResult {
+        response: "Hello! Welcome to SupplementBot. What brings you in today?".to_string(),
+        phase: "chief_complaint".to_string(),
+        emergency: false,
+        complete: false,
+        candidate_count: 0,
+        citations: vec![],
+    });
+    let _ = send_json(&mut socket, &ServerMessage::from_turn(&opening_result)).await;
 
     // Main message loop
     while let Some(Ok(msg)) = socket.recv().await {
