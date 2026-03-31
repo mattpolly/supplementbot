@@ -112,7 +112,15 @@ impl<'a> IntakeEngine<'a> {
     ) -> Option<IntakeStageId> {
         match ctx.stage {
             IntakeStageId::ChiefComplaint => {
-                if !ctx.active_profiles.is_empty() {
+                // Transition when profiles are loaded, OR when a complaint has been
+                // recorded (chief_complaint is set) and what_brings_you_in was already asked.
+                // The second condition prevents deadlock when concept mapping fails to resolve
+                // a profile but the user clearly stated their complaint.
+                let complaint_recorded = ctx.chief_complaint.is_some();
+                let already_asked = ctx.visited_questions.contains("what_brings_you_in");
+                if !ctx.active_profiles.is_empty()
+                    || (complaint_recorded && already_asked)
+                {
                     trace.push("Chief complaint recorded → HPI".into());
                     return Some(IntakeStageId::Hpi);
                 }

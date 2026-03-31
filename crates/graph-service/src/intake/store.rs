@@ -386,19 +386,27 @@ impl IntakeGraphStore {
     }
 
     /// Find a symptom profile by name or alias (case-insensitive).
+    ///
+    /// Matching tiers (first match wins):
+    ///   1. Exact ID match (slug of input)
+    ///   2. Exact name or alias match
+    ///   3. Input contains name, or name/alias contains input (substring)
     pub async fn find_symptom_profile(&self, name: &str) -> Option<SymptomProfile> {
-        let lower = name.to_lowercase();
-        // First try exact ID match
+        let lower = name.to_lowercase().trim().to_string();
+
+        // Tier 1: exact ID match
         if let Some(sp) = self.get_symptom_profile(&slug(&lower)).await {
             return Some(sp);
         }
-        // Search all profiles by name and aliases
+
         let all: Vec<SymptomProfileRecordWithId> = self
             .db
             .select("intake_symptom_profile")
             .await
             .unwrap_or_default();
-        for r in all {
+
+        // Tier 2: exact name or alias match
+        for r in &all {
             if r.name.to_lowercase() == lower {
                 return self.get_symptom_profile(&record_key(&r.id)).await;
             }
@@ -409,6 +417,35 @@ impl IntakeGraphStore {
                 }
             }
         }
+
+        // Tier 3: substring match — input contains profile name, or profile name/alias
+        // contains input. Prefers the longest alias match to avoid over-broad matches.
+        let mut best: Option<(String, usize)> = None; // (record_key, match_len)
+        for r in &all {
+            let profile_name_lower = r.name.to_lowercase();
+            let aliases: Vec<String> = serde_json::from_str(&r.aliases).unwrap_or_default();
+
+            // Check if input contains the profile name (e.g. "tension headaches" contains "headache")
+            if lower.contains(&profile_name_lower) || profile_name_lower.contains(&lower) {
+                let match_len = profile_name_lower.len();
+                if best.as_ref().map_or(true, |(_, l)| match_len > *l) {
+                    best = Some((record_key(&r.id), match_len));
+                }
+            }
+            for alias in &aliases {
+                let alias_lower = alias.to_lowercase();
+                if lower.contains(&alias_lower) || alias_lower.contains(&lower) {
+                    let match_len = alias_lower.len();
+                    if best.as_ref().map_or(true, |(_, l)| match_len > *l) {
+                        best = Some((record_key(&r.id), match_len));
+                    }
+                }
+            }
+        }
+        if let Some((key, _)) = best {
+            return self.get_symptom_profile(&key).await;
+        }
+
         None
     }
 

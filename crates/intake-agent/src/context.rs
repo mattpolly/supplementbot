@@ -216,6 +216,27 @@ pub fn build_context(
 
     // --- Phase-specific task instruction ---
     prompt.push_str("YOUR TASK THIS TURN:\n");
+
+    // If we have candidates and are still gathering, tell the LLM to briefly
+    // surface what it's considering before asking the next question.
+    let is_questioning_phase = !matches!(
+        session.phase,
+        IntakePhase::Recommendation | IntakePhase::CausationInquiry
+    );
+    if !session.candidates.is_empty() && is_questioning_phase && session.oldcarts.filled_count() >= 1 {
+        let top = session.candidates.top(2);
+        let names: Vec<&str> = top.iter().map(|c| c.ingredient.as_str()).collect();
+        prompt.push_str(&format!(
+            "IMPORTANT — SHOW YOUR WORK BRIEFLY:\n\
+             Before asking your question, give the user a one-sentence peek at\n\
+             what you're currently considering. For example:\n\
+             \"Based on what you've described, I'm looking at {} as possibilities.\"\n\
+             Keep it to one sentence — then ask your question on the next line.\n\
+             This makes the person feel heard and shows the system is doing something useful.\n\n",
+            names.join(" and ")
+        ));
+    }
+
     prompt.push_str(task_instruction(session, differentiators));
     prompt.push('\n');
 
@@ -413,6 +434,35 @@ pub fn build_context_v2(
 
     // --- THE GRAPH-DRIVEN TASK (replaces hardcoded "YOUR TASK THIS TURN") ---
     prompt.push_str("YOUR TASK THIS TURN:\n");
+
+    // If we have candidates and are still gathering info, tell the LLM to
+    // briefly surface what it's considering before asking the next question.
+    // This makes the conversation feel collaborative, not interrogative.
+    let has_candidates = !session.candidates.is_empty();
+    let still_gathering = !matches!(
+        session.phase,
+        IntakePhase::Recommendation | IntakePhase::CausationInquiry
+    );
+    // Only show candidate awareness if at least 1 OLDCARTS dim is filled
+    // (so we don't surface on the very first question)
+    let enough_context = session.oldcarts.filled_count() >= 1
+        || !session.chief_complaints.is_empty() && session.oldcarts.filled_count() >= 0;
+    let show_candidate_preview = has_candidates && still_gathering && enough_context
+        && session.oldcarts.filled_count() >= 1;
+
+    if show_candidate_preview {
+        let top = session.candidates.top(2);
+        let names: Vec<&str> = top.iter().map(|c| c.ingredient.as_str()).collect();
+        prompt.push_str(&format!(
+            "IMPORTANT — SHOW YOUR WORK BRIEFLY:\n\
+             Before asking your question, give the user a one-sentence peek at\n\
+             what you're currently considering. For example:\n\
+             \"Based on what you've described, I'm looking at {} as possibilities.\"\n\
+             Keep it to one sentence — then ask your question on the next line.\n\
+             This makes the person feel heard and shows the system is doing something useful.\n\n",
+            names.join(" and ")
+        ));
+    }
 
     if let Some(ref question) = turn_action.question {
         // The graph selected a specific question. Tell the LLM to render it.

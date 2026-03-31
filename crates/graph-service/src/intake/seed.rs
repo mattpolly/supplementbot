@@ -13,6 +13,7 @@ use super::types::*;
 pub async fn seed_intake_graph(store: &IntakeGraphStore) {
     seed_stages(store).await;
     seed_archetypes(store).await;
+    seed_symptom_profiles(store).await;
     seed_goals(store).await;
     seed_questions(store).await;
     seed_exit_conditions(store).await;
@@ -153,6 +154,249 @@ async fn seed_archetypes(store: &IntakeGraphStore) {
     ];
     for a in &archetypes {
         store.add_archetype(a).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Symptom Profiles — one per common presenting complaint, with aliases
+// so free-text matching (e.g. "headaches" → "headache" profile) works.
+// ---------------------------------------------------------------------------
+
+async fn seed_symptom_profiles(store: &IntakeGraphStore) {
+    let profiles = vec![
+        // --- Pain archetype ---
+        SymptomProfile {
+            id: "headache".into(),
+            name: "Headache".into(),
+            cui: Some("C0018681".into()),
+            aliases: vec!["headaches".into(), "head pain".into(), "head ache".into(),
+                          "migraine".into(), "migraines".into(), "tension headache".into(),
+                          "occipital headache".into(), "occipital tension".into(),
+                          "tension headaches".into()],
+            archetype_id: "cognitive".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["nervous system".into()],
+        },
+        SymptomProfile {
+            id: "muscle_cramps".into(),
+            name: "Muscle Cramps".into(),
+            cui: Some("C0026821".into()),
+            aliases: vec!["cramps".into(), "muscle cramp".into(), "cramping".into(),
+                          "muscle spasms".into(), "spasms".into(), "leg cramps".into(),
+                          "muscle tightness".into(), "muscle tension".into(), "tightness".into()],
+            archetype_id: "pain".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["musculoskeletal system".into(), "nervous system".into()],
+        },
+        SymptomProfile {
+            id: "joint_pain".into(),
+            name: "Joint Pain".into(),
+            cui: Some("C0003862".into()),
+            aliases: vec!["joint ache".into(), "arthralgia".into(), "stiff joints".into(),
+                          "joint stiffness".into(), "achy joints".into(), "joint discomfort".into()],
+            archetype_id: "pain".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: None,
+            associated_systems: vec!["musculoskeletal system".into(), "immune system".into()],
+        },
+        SymptomProfile {
+            id: "back_pain".into(),
+            name: "Back Pain".into(),
+            cui: Some("C0004604".into()),
+            aliases: vec!["backache".into(), "back ache".into(), "lower back pain".into(),
+                          "upper back pain".into(), "back discomfort".into(), "spinal pain".into(),
+                          "subscapular".into(), "subscapular tightness".into()],
+            archetype_id: "pain".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: None,
+            associated_systems: vec!["musculoskeletal system".into()],
+        },
+        // --- Sleep archetype ---
+        SymptomProfile {
+            id: "insomnia".into(),
+            name: "Insomnia".into(),
+            cui: Some("C0917801".into()),
+            aliases: vec!["trouble sleeping".into(), "can't sleep".into(), "sleep problems".into(),
+                          "poor sleep".into(), "sleep issues".into(), "difficulty sleeping".into(),
+                          "waking up at night".into(), "sleep disturbance".into()],
+            archetype_id: "sleep".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["nervous system".into(), "endocrine system".into()],
+        },
+        // --- Fatigue archetype ---
+        SymptomProfile {
+            id: "fatigue".into(),
+            name: "Fatigue".into(),
+            cui: Some("C0015672".into()),
+            aliases: vec!["tired".into(), "tiredness".into(), "exhaustion".into(), "exhausted".into(),
+                          "low energy".into(), "lack of energy".into(), "no energy".into(),
+                          "always tired".into(), "chronic fatigue".into(), "lethargy".into(),
+                          "sluggish".into(), "worn out".into()],
+            archetype_id: "fatigue".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["endocrine system".into(), "nervous system".into()],
+        },
+        // --- Digestive archetype ---
+        SymptomProfile {
+            id: "nausea".into(),
+            name: "Nausea".into(),
+            cui: Some("C0027497".into()),
+            aliases: vec!["nauseous".into(), "sick to stomach".into(), "upset stomach".into(),
+                          "queasiness".into(), "queasy".into(), "stomach upset".into(),
+                          "gut upset".into(), "GI upset".into(), "gut troubles".into(),
+                          "GI allergy upset".into()],
+            archetype_id: "digestive".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["digestive system".into()],
+        },
+        SymptomProfile {
+            id: "bloating".into(),
+            name: "Bloating".into(),
+            cui: Some("C0000731".into()),
+            aliases: vec!["bloated".into(), "abdominal bloating".into(), "gas".into(),
+                          "gassy".into(), "distension".into(), "fullness".into(),
+                          "digestive discomfort".into(), "gut discomfort".into()],
+            archetype_id: "digestive".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["digestive system".into()],
+        },
+        SymptomProfile {
+            id: "digestive_discomfort".into(),
+            name: "Digestive Discomfort".into(),
+            cui: None,
+            aliases: vec!["stomach pain".into(), "abdominal pain".into(), "gut pain".into(),
+                          "stomach ache".into(), "tummy ache".into(), "belly pain".into(),
+                          "indigestion".into(), "GI issues".into(), "gastrointestinal issues".into(),
+                          "gut issues".into(), "gut troubles".into(), "stomach troubles".into()],
+            archetype_id: "digestive".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["digestive system".into()],
+        },
+        // --- Mood archetype ---
+        SymptomProfile {
+            id: "anxiety".into(),
+            name: "Anxiety".into(),
+            cui: Some("C0003469".into()),
+            aliases: vec!["anxious".into(), "worried".into(), "worry".into(), "stress".into(),
+                          "stressed".into(), "nervous".into(), "on edge".into(),
+                          "panic".into(), "panic attacks".into()],
+            archetype_id: "mood".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["nervous system".into(), "endocrine system".into()],
+        },
+        SymptomProfile {
+            id: "depression".into(),
+            name: "Depression".into(),
+            cui: Some("C0011570".into()),
+            aliases: vec!["depressed".into(), "low mood".into(), "sad".into(), "sadness".into(),
+                          "down".into(), "feeling down".into(), "hopeless".into(), "apathy".into()],
+            archetype_id: "mood".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["nervous system".into(), "endocrine system".into()],
+        },
+        // --- Cognitive archetype ---
+        SymptomProfile {
+            id: "brain_fog".into(),
+            name: "Brain Fog".into(),
+            cui: None,
+            aliases: vec!["foggy brain".into(), "mental fog".into(), "fuzzy thinking".into(),
+                          "can't concentrate".into(), "trouble concentrating".into(),
+                          "poor focus".into(), "memory problems".into(), "forgetful".into(),
+                          "cognitive issues".into()],
+            archetype_id: "cognitive".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["nervous system".into()],
+        },
+        // --- Immune/Inflammatory archetype ---
+        SymptomProfile {
+            id: "inflammation".into(),
+            name: "Inflammation".into(),
+            cui: Some("C0021368".into()),
+            aliases: vec!["inflamed".into(), "swelling".into(), "swollen".into(), "redness".into(),
+                          "hot joints".into(), "inflammatory pain".into(), "flare".into()],
+            archetype_id: "immune".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["immune system".into()],
+        },
+        // --- Skin archetype ---
+        SymptomProfile {
+            id: "skin_issues".into(),
+            name: "Skin Issues".into(),
+            cui: None,
+            aliases: vec!["rash".into(), "dry skin".into(), "itchy skin".into(), "eczema".into(),
+                          "skin irritation".into(), "acne".into(), "breakouts".into(),
+                          "psoriasis".into(), "hives".into(), "skin rash".into()],
+            archetype_id: "skin".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["immune system".into(), "integumentary system".into()],
+        },
+        // --- Other common complaints ---
+        SymptomProfile {
+            id: "cold_intolerance".into(),
+            name: "Cold Intolerance".into(),
+            cui: None,
+            aliases: vec!["always cold".into(), "sensitive to cold".into(),
+                          "cold sensitivity".into(), "feel cold".into()],
+            archetype_id: "fatigue".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(2),
+            associated_systems: vec!["endocrine system".into()],
+        },
+        SymptomProfile {
+            id: "hair_thinning".into(),
+            name: "Hair Thinning".into(),
+            cui: None,
+            aliases: vec!["hair loss".into(), "thinning hair".into(), "hair fall".into(),
+                          "alopecia".into(), "balding".into()],
+            archetype_id: "immune".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(2),
+            associated_systems: vec!["endocrine system".into(), "integumentary system".into()],
+        },
+        SymptomProfile {
+            id: "muscle_tension".into(),
+            name: "Muscle Tension".into(),
+            cui: None,
+            aliases: vec!["tense muscles".into(), "tight muscles".into(), "stiffness".into(),
+                          "muscle stiffness".into(), "neck tension".into(), "shoulder tension".into()],
+            archetype_id: "pain".into(),
+            relevant_oldcarts_override: None,
+            irrelevant_oldcarts_override: None,
+            sufficient_dimensions_override: Some(3),
+            associated_systems: vec!["musculoskeletal system".into(), "nervous system".into()],
+        },
+    ];
+
+    for p in &profiles {
+        store.add_symptom_profile(p).await;
     }
 }
 

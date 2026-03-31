@@ -72,6 +72,10 @@ struct Cli {
     /// Complexity lens for extraction: 5th, 10th, college, graduate, or 0.0-1.0
     #[arg(short, long, default_value = "5th")]
     lens: String,
+
+    /// Run citation backing only — no LLM calls. Requires SuppKG (--suppkg or SUPPKG_PATH env).
+    #[arg(long)]
+    cite_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -514,6 +518,78 @@ async fn main() {
 
     // Create merge store for synonym resolution (shares DB with graph)
     let merge_store = MergeStore::new(graph.db());
+
+    // --cite-only: run citation backing against existing graph and exit
+    if cli.cite_only {
+        // Resolve SuppKG path: --suppkg flag → SUPPKG_PATH env → error
+        let suppkg_dir = cli.suppkg.clone()
+            .or_else(|| {
+                std::env::var("SUPPKG_PATH").ok().map(|p| {
+                    // SUPPKG_PATH may point to the json file; use its parent dir
+                    std::path::Path::new(&p)
+                        .parent()
+                        .map(|d| d.to_string_lossy().to_string())
+                        .unwrap_or(p)
+                })
+            });
+
+        let dir = match suppkg_dir {
+            Some(d) => d,
+            None => {
+                eprintln!("--cite-only requires SuppKG. Pass --suppkg <dir> or set SUPPKG_PATH.");
+                std::process::exit(1);
+            }
+        };
+
+        let json_path = format!("{}/supp_kg.json", dir);
+        let edgelist_path = format!("{}/suppkg_v2.edgelist", dir);
+
+        print!("  Loading SuppKG from {}/ ...", dir);
+        let kg_result = if std::path::Path::new(&edgelist_path).exists() {
+            SuppKg::load_with_edgelist(&json_path, &edgelist_path)
+        } else {
+            SuppKg::load(&json_path)
+        };
+
+        let kg = match kg_result {
+            Ok(kg) => {
+                println!(
+                    " {} nodes, {} terms, {} edge pairs",
+                    kg.node_count(), kg.term_count(), kg.edge_pair_count()
+                );
+                kg
+            }
+            Err(e) => {
+                eprintln!(" Error loading SuppKG: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let sink = match JsonlFileSink::new(&cli.output) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error creating event log: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        println!("  Running citation backing ...");
+        let cite_corr = Uuid::new_v4();
+        let cite_result = nsai_loop::citations::run_citation_backing(
+            &graph, &kg, &merge_store, &source_store, &sink, cite_corr,
+        )
+        .await;
+
+        println!("─── Citation Backing ───────────────────────────────────");
+        println!(
+            "  {} edges checked, {} backed by PubMed, {} citations stored",
+            cite_result.edges_checked, cite_result.edges_backed, cite_result.citations_stored
+        );
+        println!();
+
+        sink.flush().expect("Failed to flush event log");
+        return;
+    }
 
     // Load SuppKG if --suppkg flag is present
     let suppkg_data = if let Some(ref dir) = cli.suppkg {
