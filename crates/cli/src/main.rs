@@ -665,8 +665,16 @@ async fn main() {
         return;
     }
 
-    // Load SuppKG if --suppkg flag is present
-    let suppkg_data = if let Some(ref dir) = cli.suppkg {
+    // Load SuppKG: --suppkg flag → SUPPKG_PATH env var → skip
+    let suppkg_resolved_dir = cli.suppkg.clone().or_else(|| {
+        std::env::var("SUPPKG_PATH").ok().map(|p| {
+            std::path::Path::new(&p)
+                .parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or(p)
+        })
+    });
+    let suppkg_data = if let Some(ref dir) = suppkg_resolved_dir {
         let json_path = format!("{}/supp_kg.json", dir);
         let edgelist_path = format!("{}/suppkg_v2.edgelist", dir);
 
@@ -743,6 +751,12 @@ async fn main() {
             println!(
                 "  Speculative:    {} observations, {} edges added",
                 result.speculative_observations, result.speculative_edges_added
+            );
+        }
+        if result.citations_stored > 0 {
+            println!(
+                "  Citations:      {} stored from SuppKG",
+                result.citations_stored
             );
         }
         println!(

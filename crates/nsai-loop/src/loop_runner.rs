@@ -15,6 +15,7 @@ use suppkg::SuppKg;
 use uuid::Uuid;
 
 use crate::analyzer;
+use crate::citations;
 use crate::comprehension;
 use crate::forward_chain;
 use crate::prompts;
@@ -59,6 +60,7 @@ pub struct LoopResult {
     pub total_gaps_filled: usize,
     pub synonym_cuis_assigned: usize,
     pub synonym_aliases_found: usize,
+    pub citations_stored: usize,
     pub deduced_chains: usize,
     pub deduced_edges_added: usize,
     pub comprehension_edges_confirmed: usize,
@@ -324,6 +326,26 @@ impl<'a> NsaiLoop<'a> {
             synonym_aliases_found = syn_result.aliases_found;
         }
 
+        // ── Step 2.6: Citation backing ────────────────────────────────────
+        // Runs after synonym resolution so newly assigned CUIs are available.
+        // Skipped if SuppKG or source store are not configured.
+        let mut citations_stored = 0;
+
+        if let (Some(suppkg), Some(merge), Some(source)) =
+            (self.suppkg, self.merge_store, self.source_store)
+        {
+            let cite_result = citations::run_citation_backing(
+                graph,
+                suppkg,
+                merge,
+                source,
+                self.sink,
+                correlation_id,
+            )
+            .await;
+            citations_stored = cite_result.citations_stored;
+        }
+
         // ── Step 3: Forward chaining (symbolic deduction) ─────────────────
         let chain_result = forward_chain::run_forward_chaining(
             self.sink,
@@ -389,6 +411,7 @@ impl<'a> NsaiLoop<'a> {
             total_gaps_filled,
             synonym_cuis_assigned,
             synonym_aliases_found,
+            citations_stored,
             deduced_chains: chain_result.chains_found,
             deduced_edges_added: chain_result.edges_added,
             comprehension_edges_confirmed: comp.edges_confirmed,
