@@ -40,7 +40,7 @@ The supplement KG uses 14 node types across three complexity tiers (foundational
 
 External data sources:
 - **iDISK 2.0** — 392 symptoms, 7,876 ingredients, 214 drugs, interaction/adverse reaction edges
-- **SuppKG** — lookup-only reference for cross-validation (edges are never imported)
+- **SuppKG** — 570,000 literature-extracted edges linking dietary compounds to clinical concepts. Used for synonym resolution (CUI assignment) and citation backing. Edges are not imported into the graph directly; instead, SuppKG citations are stored in `edge_citation` and surfaced at recommendation time.
 
 ## Project Structure
 
@@ -149,6 +149,23 @@ cargo run --bin supplementbot -- -n Zinc -p anthropic
 | `-o, --output` | `events.jsonl` | Event log output file |
 | `--max-iterations` | `3` | Max gap-filling iterations |
 | `--max-gaps` | `5` | Max gaps to fill per iteration |
+| `--suppkg` | — | Path to SuppKG data directory (required for `--resolve-cuis` and `--cite-only`) |
+| `--resolve-cuis` | — | Populate merge store CUIs from SuppKG for all graph nodes, then exit. Run this before `--cite-only` if the graph was built without `--suppkg`. |
+| `--cite-only` | — | Run citation backing against the existing graph using SuppKG, then exit. No LLM calls. Stores citations in `edge_citation` table. |
+
+#### Retroactive citation backing
+
+After building the graph with LLM runs, populate PubMed-sourced citations without re-running the LLMs:
+
+```bash
+# Step 1: assign CUIs to graph nodes (only needed once, or if graph was rebuilt)
+./target/release/supplementbot --graph-db ./data/graph --suppkg ./data/suppkg --resolve-cuis
+
+# Step 2: store citations from SuppKG into edge_citation table
+./target/release/supplementbot --graph-db ./data/graph --suppkg ./data/suppkg --cite-only
+```
+
+Citation backing is ingredient-level: for each `Ingredient` node, the system finds its best CUI, retrieves all outgoing SuppKG edges, and stores supporting sentences. Hardcoded CUI overrides correct known mismatches in the SuppKG term index (e.g. "magnesium" → magnesium stearate, not dietary magnesium).
 
 ### View Event Logs
 
