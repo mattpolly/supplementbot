@@ -15,6 +15,7 @@ use llm_client::provider::CompletionRequest;
 
 use crate::extract::{apply_extraction, extract_from_message, to_user_signal};
 use crate::state::AppState;
+use crate::symptom_resolver;
 
 // ---------------------------------------------------------------------------
 // Per-turn orchestration — v2 (intake KG driven).
@@ -158,24 +159,43 @@ pub async fn process_turn(
         })
         .await?;
 
-    // Step 4: Map concepts to graph nodes + resolve to symptom profiles
+    // Step 4: Map concepts to graph nodes (for body systems, mechanisms, etc.)
     for symptom in &extraction.symptoms {
         let mapped = concept_map::map_text_to_nodes(symptom, &s.graph, &s.merge).await;
         if mapped.is_empty() {
             concept_map::log_unmapped(symptom, &format!("session {session_id}"));
         }
-        // Resolve mapped symptom names to intake KG SymptomProfile IDs
-        for m in &mapped {
-            if let Some(profile) = s.intake_store.find_symptom_profile(&m.node_name).await
-            {
-                s.sessions
-                    .with_session(session_id, |session| {
-                        if !session.active_profiles.contains(&profile.id) {
-                            session.active_profiles.push(profile.id.clone());
+    }
+
+    // Step 4a: Symptom resolver — maps free-text symptom phrases to intake
+    // profile IDs using a closed-vocabulary LLM classifier. This handles
+    // colloquial terms ("jittery", "queasy", "can't think straight") that
+    // alias lists and string matching can't reliably cover, while respecting
+    // clinical distinctions between similar-sounding profiles.
+    if !extraction.symptoms.is_empty() {
+        let known_profiles = s.intake_store.all_symptom_profile_ids().await;
+        let resolved = symptom_resolver::resolve_symptoms(
+            &extraction.symptoms,
+            &known_profiles,
+            s.extractor.as_ref(),
+        )
+        .await;
+
+        eprintln!(
+            "[session {session_id}] symptom resolver: {:?} → {:?}",
+            extraction.symptoms, resolved
+        );
+
+        if !resolved.is_empty() {
+            s.sessions
+                .with_session(session_id, |session| {
+                    for profile_id in &resolved {
+                        if !session.active_profiles.contains(profile_id) {
+                            session.active_profiles.push(profile_id.clone());
                         }
-                    })
-                    .await;
-            }
+                    }
+                })
+                .await;
         }
     }
 

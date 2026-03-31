@@ -3,6 +3,7 @@ mod extract;
 mod handler;
 mod session_mgr;
 mod state;
+mod symptom_resolver;
 mod ws;
 
 use std::net::SocketAddr;

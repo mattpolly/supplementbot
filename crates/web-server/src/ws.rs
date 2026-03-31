@@ -157,15 +157,27 @@ pub async fn ws_handler(
 
 /// Handle one WebSocket connection.
 ///
-/// Session creation (and cap counting) is deferred until the user sends
-/// their first message. Page loads and refreshes that never result in a
-/// user typing something do not consume a session slot.
+/// Session is created on connect so the opening greeting fires immediately.
+/// The denied check happens at connect time — capacity-limited connections
+/// are rejected before the user types anything.
 async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
-    // Send a lightweight ready signal so the frontend knows the socket is up.
-    // No session is created yet — we wait for the first real user message.
-    let _ = send_json(&mut socket, &ServerMessage::ready()).await;
+    // Create the session immediately so we can send the opening greeting.
+    let session_id = match state.inner.sessions.create_session(donor).await {
+        Ok(id) => id,
+        Err(denied) => {
+            let _ = send_json(&mut socket, &ServerMessage::denied(&denied.to_string())).await;
+            return;
+        }
+    };
 
-    let mut session_id: Option<uuid::Uuid> = None;
+    eprintln!("[ws] session {session_id} started");
+
+    // Send welcome (gives the frontend the session_id) then the opening greeting.
+    let _ = send_json(&mut socket, &ServerMessage::welcome(&session_id)).await;
+    let _ = send_json(&mut socket, &ServerMessage::typing()).await;
+    if let Some(opening) = generate_opening(&state, &session_id).await {
+        let _ = send_json(&mut socket, &ServerMessage::from_turn(&opening)).await;
+    }
 
     // Main message loop
     while let Some(Ok(msg)) = socket.recv().await {
@@ -183,30 +195,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
                     continue;
                 }
 
-                // First message — create the session now and count it.
-                let sid = match session_id {
-                    Some(id) => id,
-                    None => {
-                        match state.inner.sessions.create_session(donor).await {
-                            Ok(id) => {
-                                eprintln!("[ws] session {id} started (first message)");
-                                // Send welcome so the frontend gets the session_id
-                                let _ = send_json(&mut socket, &ServerMessage::welcome(&id)).await;
-                                // Generate opening greeting
-                                let _ = send_json(&mut socket, &ServerMessage::typing()).await;
-                                if let Some(opening) = generate_opening(&state, &id).await {
-                                    let _ = send_json(&mut socket, &ServerMessage::from_turn(&opening)).await;
-                                }
-                                session_id = Some(id);
-                                id
-                            }
-                            Err(denied) => {
-                                let _ = send_json(&mut socket, &ServerMessage::denied(&denied.to_string())).await;
-                                return;
-                            }
-                        }
-                    }
-                };
+                let sid = session_id;
 
                 // Send typing indicator
                 let _ = send_json(&mut socket, &ServerMessage::typing()).await;
@@ -231,11 +220,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
         }
     }
 
-    if let Some(id) = session_id {
-        eprintln!("[ws] session {id} ended");
-    } else {
-        eprintln!("[ws] connection closed before session started");
-    }
+    eprintln!("[ws] session {session_id} ended");
 }
 
 /// Generate the opening "What brings you in today?" message.

@@ -200,7 +200,7 @@ impl IntakeGraphStore {
         let key = stage.id.as_str();
         let _: Option<StageRecordWithId> = self
             .db
-            .create(("intake_stage", key))
+            .upsert(("intake_stage", key))
             .content(StageRecord {
                 stage_id: key.to_string(),
                 description: stage.description.clone(),
@@ -223,7 +223,7 @@ impl IntakeGraphStore {
     pub async fn add_question(&self, q: &QuestionTemplate) {
         let _: Option<QuestionRecordWithId> = self
             .db
-            .create(("intake_question", q.id.as_str()))
+            .upsert(("intake_question", q.id.as_str()))
             .content(QuestionRecord {
                 template: q.template.clone(),
                 oldcarts_dimension: q.oldcarts_dimension.map(|d| d.as_str().to_string()),
@@ -266,7 +266,7 @@ impl IntakeGraphStore {
     pub async fn add_goal(&self, g: &ClinicalGoal) {
         let _: Option<GoalRecordWithId> = self
             .db
-            .create(("intake_goal", g.id.as_str()))
+            .upsert(("intake_goal", g.id.as_str()))
             .content(GoalRecord {
                 description: g.description.clone(),
                 fulfilled_by: g.fulfilled_by.as_ref().map(|f| format!("{:?}", f)),
@@ -289,7 +289,7 @@ impl IntakeGraphStore {
     pub async fn add_archetype(&self, a: &ArchetypeProfile) {
         let _: Option<ArchetypeRecordWithId> = self
             .db
-            .create(("intake_archetype", a.id.as_str()))
+            .upsert(("intake_archetype", a.id.as_str()))
             .content(ArchetypeRecord {
                 name: a.name.clone(),
                 relevant_oldcarts: serde_json::to_string(&a.relevant_oldcarts)
@@ -340,7 +340,7 @@ impl IntakeGraphStore {
     pub async fn add_symptom_profile(&self, sp: &SymptomProfile) {
         let _: Option<SymptomProfileRecordWithId> = self
             .db
-            .create(("intake_symptom_profile", sp.id.as_str()))
+            .upsert(("intake_symptom_profile", sp.id.as_str()))
             .content(SymptomProfileRecord {
                 name: sp.name.clone(),
                 cui: sp.cui.clone(),
@@ -458,12 +458,23 @@ impl IntakeGraphStore {
         all.len()
     }
 
+    /// Return all symptom profile IDs — used by the symptom resolver to
+    /// build the closed-vocabulary list for the LLM classifier.
+    pub async fn all_symptom_profile_ids(&self) -> Vec<String> {
+        let all: Vec<SymptomProfileRecordWithId> = self
+            .db
+            .select("intake_symptom_profile")
+            .await
+            .unwrap_or_default();
+        all.iter().map(|r| record_key(&r.id)).collect()
+    }
+
     // -- Symptom Clusters -----------------------------------------------------
 
     pub async fn add_cluster(&self, c: &SymptomCluster) {
         let _: Option<ClusterRecordWithId> = self
             .db
-            .create(("intake_cluster", c.id.as_str()))
+            .upsert(("intake_cluster", c.id.as_str()))
             .content(ClusterRecord {
                 name: c.name.clone(),
                 description: c.description.clone(),
@@ -517,7 +528,7 @@ impl IntakeGraphStore {
     pub async fn add_system_review(&self, sr: &SystemReviewNode) {
         let _: Option<SystemReviewRecordWithId> = self
             .db
-            .create(("intake_system_review", sr.id.as_str()))
+            .upsert(("intake_system_review", sr.id.as_str()))
             .content(SystemReviewRecord {
                 system_name: sr.system_name.clone(),
                 screening_questions: serde_json::to_string(&sr.screening_questions)
@@ -565,7 +576,7 @@ impl IntakeGraphStore {
     pub async fn add_graph_action(&self, ga: &GraphActionNode) {
         let _: Option<GraphActionRecordWithId> = self
             .db
-            .create(("intake_graph_action", ga.id.as_str()))
+            .upsert(("intake_graph_action", ga.id.as_str()))
             .content(GraphActionRecord {
                 action_type: format!("{:?}", ga.action_type),
                 description: ga.description.clone(),
@@ -579,7 +590,7 @@ impl IntakeGraphStore {
     pub async fn add_exit_condition(&self, ec: &ExitCondition) {
         let _: Option<ExitConditionRecordWithId> = self
             .db
-            .create(("intake_exit_condition", ec.id.as_str()))
+            .upsert(("intake_exit_condition", ec.id.as_str()))
             .content(ExitConditionRecord {
                 description: ec.description.clone(),
                 condition_type: format!("{:?}", ec.condition),
