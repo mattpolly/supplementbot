@@ -11,20 +11,23 @@ use uuid::Uuid;
 ///
 /// SuppKG's term index often resolves common supplement names to pharmaceutical
 /// excipient or chemical compound CUIs rather than the dietary supplement CUI.
-/// For example "magnesium" resolves to magnesium stearate (DC0126791) instead
-/// of the dietary magnesium supplement (C1268858). These overrides take
-/// precedence over both merge store and SuppKG term resolution.
+/// For example "magnesium" resolves to DC0126791 (magnesium stearate, 3 edges)
+/// rather than C1268858 (magnesium supplement, 118 edges). These overrides use
+/// the CUIs with the richest citation coverage for each ingredient.
+///
+/// Only applied when the override CUI actually has outgoing edges in the loaded
+/// SuppKG, so test fixtures with custom CUIs still work.
 fn hardcoded_cui(ingredient: &str) -> Option<&'static str> {
     match ingredient.to_lowercase().as_str() {
-        "magnesium" => Some("C1268858"),   // magnesium supplement (dietary)
-        "zinc" => Some("C1268859"),        // zinc supplement
-        "vitamin d" | "vitamin d3" | "cholecalciferol" => Some("C0042866"), // vitamin D
-        "vitamin c" | "ascorbic acid" => Some("C0003968"),                  // ascorbic acid
-        "berberine" => Some("C0053078"),   // berberine
-        "curcumin" | "turmeric" => Some("C0010467"),                        // curcumin
-        "omega-3" | "omega 3" | "fish oil" | "epa" | "dha" => Some("C0015347"), // fish oils
-        "ashwagandha" | "withania somnifera" => Some("C0600280"),           // withania somnifera
+        "magnesium" => Some("C1268858"),    // magnesium supplement (118 edges vs stearate's 3)
+        "zinc" => Some("C1268859"),         // zinc supplement (401 edges, no term match otherwise)
+        "vitamin d" | "vitamin d3" => Some("C0535968"), // 25-hydroxyvitamin D (60 edges, best available)
+        "vitamin c" => Some("DC0003968"),   // ascorbic acid 6-palmitate (694 edges, only vitamin C node)
+        "berberine" => Some("DC0005117"),   // berberina (291 edges vs "berberine"'s 1 edge)
+        "omega-3" | "omega 3" | "fish oil" => Some("DC0015689"), // omega-3 essential fatty acids (405 edges)
         _ => None,
+        // curcumin: term index gives DC0010467 (384 edges) — correct, no override needed
+        // ashwagandha: not in this SuppKG — falls through to no-match skip
     }
 }
 
@@ -112,9 +115,6 @@ pub async fn run_citation_backing(
             let target_term = suppkg.first_term_for(target_cui).to_string();
 
             for citation in citations {
-                if citation.pmid == 0 {
-                    continue;
-                }
                 let record = CitationRecord {
                     source_node: ingredient_name.clone(),
                     target_node: target_term.clone(),
