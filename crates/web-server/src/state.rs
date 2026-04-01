@@ -161,16 +161,19 @@ impl AppState {
 }
 
 /// Build the conversational renderer LLM from RENDERER_PROVIDER / RENDERER_MODEL env vars.
-/// Falls back to Anthropic Sonnet.
+/// If GOOGLE_API_KEY is set, wraps with a Gemini fallback and 20s timeout.
 fn build_renderer() -> Arc<dyn LlmProvider> {
     let provider = std::env::var("RENDERER_PROVIDER").unwrap_or_else(|_| "anthropic".to_string());
     let model = std::env::var("RENDERER_MODEL")
         .unwrap_or_else(|_| default_model_for(&provider).to_string());
-    build_provider(&provider, &model)
+    let primary = build_provider(&provider, &model);
+    let gemini_model = std::env::var("GEMINI_MODEL")
+        .unwrap_or_else(|_| "gemini-2.0-flash".to_string());
+    wrap_with_fallback(primary, "gemini", &gemini_model)
 }
 
 /// Build the extraction LLM from EXTRACTOR_PROVIDER / EXTRACTOR_MODEL env vars.
-/// Falls back to same as renderer.
+/// Wraps with a Gemini fallback and 20s timeout if GEMINI_API_KEY is set.
 fn build_extractor() -> Arc<dyn LlmProvider> {
     let provider = std::env::var("EXTRACTOR_PROVIDER")
         .or_else(|_| std::env::var("RENDERER_PROVIDER"))
@@ -178,7 +181,51 @@ fn build_extractor() -> Arc<dyn LlmProvider> {
     let model = std::env::var("EXTRACTOR_MODEL")
         .or_else(|_| std::env::var("RENDERER_MODEL"))
         .unwrap_or_else(|_| default_model_for(&provider).to_string());
-    build_provider(&provider, &model)
+    let primary = build_provider(&provider, &model);
+    let gemini_model = std::env::var("GEMINI_MODEL")
+        .unwrap_or_else(|_| "gemini-2.0-flash".to_string());
+    wrap_with_fallback(primary, "gemini", &gemini_model)
+}
+
+/// Wrap a provider with a Gemini fallback if GOOGLE_API_KEY is available.
+/// Uses a 20-second timeout per call. If the key isn't set, returns primary as-is.
+fn wrap_with_fallback(
+    primary: Arc<dyn LlmProvider>,
+    fallback_provider: &str,
+    fallback_model: &str,
+) -> Arc<dyn LlmProvider> {
+    use llm_client::fallback::FallbackProvider;
+    use std::time::Duration;
+
+    if let Ok(fallback) = try_build_provider(fallback_provider, fallback_model) {
+        eprintln!(
+            "  [fallback] {}/{} → {}/{}  (20s timeout)",
+            primary.provider_name(), primary.model_name(),
+            fallback_provider, fallback_model
+        );
+        Arc::new(FallbackProvider::new(primary, fallback, Duration::from_secs(20)))
+    } else {
+        primary
+    }
+}
+
+/// Try to build a provider without panicking on missing keys.
+fn try_build_provider(provider: &str, model: &str) -> Result<Arc<dyn LlmProvider>, ()> {
+    match provider {
+        "gemini" => {
+            use llm_client::gemini::GeminiProvider;
+            GeminiProvider::from_env(model)
+                .map(|p| Arc::new(p) as Arc<dyn LlmProvider>)
+                .map_err(|_| ())
+        }
+        "anthropic" => {
+            use llm_client::anthropic::AnthropicProvider;
+            AnthropicProvider::from_env(model)
+                .map(|p| Arc::new(p) as Arc<dyn LlmProvider>)
+                .map_err(|_| ())
+        }
+        _ => Err(()),
+    }
 }
 
 fn build_provider(provider: &str, model: &str) -> Arc<dyn LlmProvider> {
