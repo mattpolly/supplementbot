@@ -483,7 +483,12 @@ pub fn build_context_v2(
                      For each candidate: which systems it supports and why relevant.\n\
                      Use the MECHANISM OF ACTION text above for sourced explanations.\n\
                      Mention evidence quality and any interaction warnings.\n\
-                     End with: \"Please discuss these with your healthcare provider.\"\n",
+                     End with: \"Please discuss these with your healthcare provider.\"\n\
+                     CRITICAL: You may ONLY discuss supplements from the CURRENT CANDIDATES list above.\n\
+                     Do NOT suggest any supplement that is not in that list, even if your general\n\
+                     training knowledge suggests it could be relevant. The candidate list is derived\n\
+                     from a curated knowledge graph — it is your only permitted source of recommendations.\n\
+                     If a supplement is not listed, do not mention it.\n",
                 );
             }
             IntakeStageId::CausationInquiry => {
@@ -637,7 +642,12 @@ fn task_instruction(session: &IntakeSession, differentiators: &[Differentiator])
              Never say \"take X\" or \"you should try X.\"\n\
              For each candidate: which systems it supports and why relevant.\n\
              Mention evidence quality and any contraindications.\n\
-             End with: \"Please discuss these with your healthcare provider.\""
+             End with: \"Please discuss these with your healthcare provider.\"\n\
+             CRITICAL: You may ONLY discuss supplements from the CURRENT CANDIDATES list above.\n\
+             Do NOT suggest any supplement that is not in that list, even if your general\n\
+             training knowledge suggests it could be relevant. The candidate list is derived\n\
+             from a curated knowledge graph — it is your only permitted source of recommendations.\n\
+             If a supplement is not listed, do not mention it."
         }
     }
 }

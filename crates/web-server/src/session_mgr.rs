@@ -100,6 +100,10 @@ impl SessionManager {
                 return Err(SessionDenied::DailyLimitReached);
             }
 
+            // Reap timed-out sessions before checking the concurrent limit,
+            // so dropped/abandoned connections don't block new ones indefinitely.
+            self.cleanup_expired().await;
+
             // Check concurrent limit
             let sessions = self.sessions.read().await;
             if sessions.len() >= self.max_concurrent {
