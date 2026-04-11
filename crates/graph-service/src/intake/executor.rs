@@ -157,6 +157,10 @@ impl<'a> GraphActionExecutor<'a> {
             lens: crate::lens::ComplexityLens::new(lens_level),
             max_depth: 4,
             max_paths_per_result: 3,
+            // Require at least one real source before a candidate can be recommended.
+            // Deduced and Speculative edges still guide questions but won't produce
+            // candidates weak enough to embarrass the recommendation.
+            min_quality: Some(crate::source::EdgeQuality::SingleProvider),
             ..Default::default()
         };
 

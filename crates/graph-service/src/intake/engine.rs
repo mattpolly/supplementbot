@@ -127,10 +127,11 @@ impl<'a> IntakeEngine<'a> {
             }
 
             IntakeStageId::Hpi => {
-                // Confidence-based auto-recommend
+                // Confidence-based auto-recommend — fire early if one candidate is
+                // clearly winning and we've gathered enough to be useful.
                 if ctx.candidate_count > 0
                     && ctx.confidence_gap > 0.3
-                    && ctx.filled_count >= 3
+                    && ctx.filled_count >= 2
                     && ctx.medications_asked
                 {
                     trace.push("Confident candidates + medications asked → Recommendation".into());
@@ -144,6 +145,13 @@ impl<'a> IntakeEngine<'a> {
                         return None; // Force medication question
                     }
                     trace.push("User done sharing → Recommendation".into());
+                    return Some(IntakeStageId::Recommendation);
+                }
+
+                // User done sharing but no candidates — still go to Recommendation
+                // so the renderer can honestly say nothing was found
+                if ctx.user_done_sharing && ctx.candidate_count == 0 {
+                    trace.push("User done sharing, no candidates → Recommendation (empty)".into());
                     return Some(IntakeStageId::Recommendation);
                 }
 
@@ -166,6 +174,11 @@ impl<'a> IntakeEngine<'a> {
                             trace.push("OLDCARTS sufficient, no diff, meds asked → Recommendation".into());
                             return Some(IntakeStageId::Recommendation);
                         }
+                    } else {
+                        // OLDCARTS sufficient but still no candidates — go to recommendation
+                        // so the renderer can honestly say nothing was found
+                        trace.push("OLDCARTS sufficient, no candidates → Recommendation (empty)".into());
+                        return Some(IntakeStageId::Recommendation);
                     }
                 }
 
@@ -174,16 +187,28 @@ impl<'a> IntakeEngine<'a> {
                     trace.push("User disengaged → Recommendation".into());
                     return Some(IntakeStageId::Recommendation);
                 }
+
+                // User disengaged with no candidates
+                if ctx.user_disengaged && ctx.candidate_count == 0 {
+                    trace.push("User disengaged, no candidates → Recommendation (empty)".into());
+                    return Some(IntakeStageId::Recommendation);
+                }
             }
 
             IntakeStageId::SystemReview => {
+                // Skip system review entirely if one candidate is already dominant
+                let dominant = ctx.candidate_count > 0 && ctx.confidence_gap > 0.4;
                 let unreviewed = self.unreviewed_system_count(ctx).await;
-                if unreviewed == 0 || ctx.user_disengaged {
-                    if ctx.differentiator_count > 0 {
+                if unreviewed == 0 || ctx.user_disengaged || dominant {
+                    if ctx.differentiator_count > 0 && !dominant {
                         trace.push("Systems reviewed → Differentiation".into());
                         return Some(IntakeStageId::Differentiation);
-                    } else if ctx.medications_asked {
-                        trace.push("Systems reviewed, no diff → Recommendation".into());
+                    } else if !ctx.medications_asked {
+                        // Safety gate — must ask about medications before recommending
+                        trace.push("Systems reviewed, medications not asked → HPI for med check".into());
+                        return Some(IntakeStageId::Hpi);
+                    } else {
+                        trace.push("Systems reviewed → Recommendation".into());
                         return Some(IntakeStageId::Recommendation);
                     }
                 }
@@ -194,6 +219,10 @@ impl<'a> IntakeEngine<'a> {
                     if ctx.medications_disclosed {
                         trace.push("Differentiation done, meds disclosed → CausationInquiry".into());
                         return Some(IntakeStageId::CausationInquiry);
+                    } else if !ctx.medications_asked {
+                        // Safety gate — must ask about medications before recommending
+                        trace.push("Differentiation done, medications not asked → HPI for med check".into());
+                        return Some(IntakeStageId::Hpi);
                     } else if ctx.medications_asked {
                         trace.push("Differentiation done → Recommendation".into());
                         return Some(IntakeStageId::Recommendation);
