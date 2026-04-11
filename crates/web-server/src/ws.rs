@@ -227,6 +227,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
         }
     }
 
+    state.inner.sessions.remove_session(&session_id).await;
     eprintln!("[ws] session {session_id} ended");
 }
 

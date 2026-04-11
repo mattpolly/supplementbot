@@ -103,7 +103,22 @@ async fn main() {
         .route("/api/explore/relational/idisk-adverse", get(explore::idisk_adverse))
         .fallback_service(ServeDir::new(&static_dir))
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state.clone());
+
+    // -- Periodic session cleanup (evict timed-out sessions every minute) --
+    {
+        let cleanup_state = state;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let evicted = cleanup_state.inner.sessions.cleanup_expired().await;
+                if evicted > 0 {
+                    eprintln!("[session_mgr] cleanup: evicted {evicted} timed-out session(s)");
+                }
+            }
+        });
+    }
 
     // -- Start server --
     let addr: SocketAddr = format!("{host}:{port}").parse().unwrap();
