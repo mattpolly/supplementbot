@@ -475,21 +475,40 @@ pub fn build_context_v2(
     } else if let Some(ref next_stage) = turn_action.next_stage {
         match next_stage {
             IntakeStageId::Recommendation => {
-                prompt.push_str(
-                    "Present what the research suggests for their symptoms.\n\
-                     Frame as: \"For symptoms like yours, the literature suggests X\n\
-                     may help support...\" — you are REPORTING findings, not prescribing.\n\
-                     Never say \"take X\" or \"you should try X.\"\n\
-                     For each candidate: which systems it supports and why relevant.\n\
-                     Use the MECHANISM OF ACTION text above for sourced explanations.\n\
-                     Mention evidence quality and any interaction warnings.\n\
-                     End with: \"Please discuss these with your healthcare provider.\"\n\
-                     CRITICAL: You may ONLY discuss supplements from the CURRENT CANDIDATES list above.\n\
-                     Do NOT suggest any supplement that is not in that list, even if your general\n\
-                     training knowledge suggests it could be relevant. The candidate list is derived\n\
-                     from a curated knowledge graph — it is your only permitted source of recommendations.\n\
-                     If a supplement is not listed, do not mention it.\n",
-                );
+                // Emit an explicit named whitelist so the LLM cannot rationalize
+                // recommending anything outside the graph's candidate set.
+                let permitted: Vec<String> = session
+                    .candidates
+                    .top(5)
+                    .iter()
+                    .map(|c| c.ingredient.clone())
+                    .collect();
+                if permitted.is_empty() {
+                    prompt.push_str(
+                        "PERMITTED SUPPLEMENTS: none found for these symptoms.\n\
+                         Tell the user honestly that the knowledge graph did not find\n\
+                         specific supplement candidates for their symptoms, and recommend\n\
+                         they consult a healthcare provider.\n",
+                    );
+                } else {
+                    prompt.push_str(&format!(
+                        "PERMITTED SUPPLEMENTS — YOU MAY ONLY MENTION THESE:\n  {}\n\
+                         Any supplement NOT in this list is FORBIDDEN. Do not mention it,\n\
+                         do not hint at it, do not say \"some people also use X\".\n\
+                         This list comes from a curated knowledge graph. It is complete.\n\n",
+                        permitted.join(", ")
+                    ));
+                    prompt.push_str(
+                        "Present what the research suggests for their symptoms.\n\
+                         Frame as: \"For symptoms like yours, the literature suggests X\n\
+                         may help support...\" — you are REPORTING findings, not prescribing.\n\
+                         Never say \"take X\" or \"you should try X.\"\n\
+                         For each permitted supplement: which systems it supports and why relevant.\n\
+                         Use the MECHANISM OF ACTION text above for sourced explanations.\n\
+                         Mention evidence quality and any interaction warnings.\n\
+                         End with: \"Please discuss these with your healthcare provider.\"\n",
+                    );
+                }
             }
             IntakeStageId::CausationInquiry => {
                 prompt.push_str(
