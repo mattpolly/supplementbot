@@ -56,6 +56,8 @@ pub struct TraversalContext {
     pub differentiator_count: usize,
     /// Chief complaint text for template filling.
     pub chief_complaint: Option<String>,
+    /// How many turns have been spent in the Differentiation phase.
+    pub differentiation_turns: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +80,13 @@ impl<'a> IntakeEngine<'a> {
         trace.push(format!("Stage: {:?}", ctx.stage));
 
         // Step 1: Check if we should transition stages
-        if let Some(next) = self.evaluate_transition(ctx, &mut trace).await {
+        if let Some(mut next) = self.evaluate_transition(ctx, &mut trace).await {
+            // Policy gate: Recommendation is NEVER reachable without medications asked.
+            // This is the single enforcement point — no path bypasses this check.
+            if next == IntakeStageId::Recommendation && !ctx.medications_asked {
+                trace.push("GATE: Recommendation blocked — medications not yet asked → HPI".into());
+                next = IntakeStageId::Hpi;
+            }
             return TurnAction {
                 question: None,
                 graph_actions: self.actions_for_stage(&next),
@@ -130,7 +138,7 @@ impl<'a> IntakeEngine<'a> {
                 // Confidence-based auto-recommend — fire early if one candidate is
                 // clearly winning and we've gathered enough to be useful.
                 if ctx.candidate_count > 0
-                    && ctx.confidence_gap > 0.3
+                    && ctx.confidence_gap > 0.15
                     && ctx.filled_count >= 2
                     && ctx.medications_asked
                 {
@@ -149,8 +157,13 @@ impl<'a> IntakeEngine<'a> {
                 }
 
                 // User done sharing but no candidates — still go to Recommendation
-                // so the renderer can honestly say nothing was found
+                // so the renderer can honestly say nothing was found.
+                // BUT: medications must be asked first regardless — safety gate is unconditional.
                 if ctx.user_done_sharing && ctx.candidate_count == 0 {
+                    if !ctx.medications_asked {
+                        trace.push("User done sharing (no candidates), medications not asked — staying for med check".into());
+                        return None;
+                    }
                     trace.push("User done sharing, no candidates → Recommendation (empty)".into());
                     return Some(IntakeStageId::Recommendation);
                 }
@@ -176,9 +189,14 @@ impl<'a> IntakeEngine<'a> {
                         }
                     } else {
                         // OLDCARTS sufficient but still no candidates — go to recommendation
-                        // so the renderer can honestly say nothing was found
-                        trace.push("OLDCARTS sufficient, no candidates → Recommendation (empty)".into());
-                        return Some(IntakeStageId::Recommendation);
+                        // so the renderer can honestly say nothing was found.
+                        // Medications must still be asked first — safety gate is unconditional.
+                        if !ctx.medications_asked {
+                            trace.push("OLDCARTS sufficient, no candidates, medications not asked — staying for med check".into());
+                        } else {
+                            trace.push("OLDCARTS sufficient, no candidates → Recommendation (empty)".into());
+                            return Some(IntakeStageId::Recommendation);
+                        }
                     }
                 }
 
@@ -190,6 +208,10 @@ impl<'a> IntakeEngine<'a> {
 
                 // User disengaged with no candidates
                 if ctx.user_disengaged && ctx.candidate_count == 0 {
+                    if !ctx.medications_asked {
+                        trace.push("User disengaged (no candidates), medications not asked — staying for med check".into());
+                        return None;
+                    }
                     trace.push("User disengaged, no candidates → Recommendation (empty)".into());
                     return Some(IntakeStageId::Recommendation);
                 }
@@ -215,7 +237,12 @@ impl<'a> IntakeEngine<'a> {
             }
 
             IntakeStageId::Differentiation => {
-                if ctx.differentiator_count == 0 || ctx.user_disengaged || ctx.user_done_sharing {
+                // Cap differentiation at 3 turns — don't interrogate the user forever
+                if ctx.differentiator_count == 0
+                    || ctx.user_disengaged
+                    || ctx.user_done_sharing
+                    || ctx.differentiation_turns >= 3
+                {
                     if ctx.medications_disclosed {
                         trace.push("Differentiation done, meds disclosed → CausationInquiry".into());
                         return Some(IntakeStageId::CausationInquiry);

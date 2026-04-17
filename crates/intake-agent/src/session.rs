@@ -168,6 +168,8 @@ pub struct IntakeSession {
     pub disclosed_supplements: Vec<String>,
     /// Differentiator count from last turn's executor results.
     pub last_differentiator_count: usize,
+    /// How many turns have been spent in the Differentiation phase.
+    pub differentiation_turns: usize,
 }
 
 impl IntakeSession {
@@ -190,6 +192,7 @@ impl IntakeSession {
             active_profiles: Vec::new(),
             disclosed_supplements: Vec::new(),
             last_differentiator_count: 0,
+            differentiation_turns: 0,
         }
     }
 

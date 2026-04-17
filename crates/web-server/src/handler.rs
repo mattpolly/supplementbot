@@ -247,6 +247,7 @@ pub async fn process_turn(
                     .chief_complaints
                     .first()
                     .map(|cc| cc.raw_text.clone()),
+                differentiation_turns: session.differentiation_turns,
             }
         })
         .await?;
@@ -337,6 +338,11 @@ pub async fn process_turn(
 
             // Record differentiator count for next turn's traversal context
             session.last_differentiator_count = action_results.discriminators.len();
+
+            // Track turns spent in differentiation phase
+            if session.phase == IntakePhase::Differentiation {
+                session.differentiation_turns += 1;
+            }
 
             // Track visited question
             if let Some(ref q) = turn_action.question {

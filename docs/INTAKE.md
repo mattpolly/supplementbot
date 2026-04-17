@@ -178,16 +178,17 @@ Tracks a single conversation. Key fields:
 - `active_profiles: Vec<String>` — SymptomProfile IDs driving archetype-aware question selection
 - `disclosed_supplements: Vec<String>` — for adverse reaction checking
 - `last_differentiator_count: usize` — from previous turn's executor (engine needs it for transitions)
+- `differentiation_turns: usize` — capped at 3; Differentiation exits after 3 turns even if discriminators remain
 
 ### Phase Transitions
 
 The engine evaluates exit conditions per stage:
 - **CC → HPI**: when at least one chief complaint is recorded
-- **HPI → SystemReview/Differentiation/Recommendation**: when OLDCARTS dimensions are sufficient for active profiles, confidence is high enough, or user signals done
+- **HPI → SystemReview/Differentiation/Recommendation**: when OLDCARTS dimensions are sufficient for active profiles, confidence ≥0.15 ahead of others, or user signals done
 - **SystemReview → Differentiation/Recommendation**: when all cluster-prioritized systems reviewed
-- **Differentiation → CausationInquiry**: when disclosed medications have interactions to discuss
+- **Differentiation → CausationInquiry**: after 3 `differentiation_turns` OR when disclosed medications have interactions to discuss
 - **CausationInquiry → Recommendation**: always (single-turn acknowledgment)
-- **Medication safety gate**: cannot reach Recommendation without asking about medications
+- **Medication chokepoint**: `next_turn()` intercepts any transition to Recommendation — if `medications_asked` is false, redirects to HPI instead. Single enforcement point regardless of which path triggered the transition.
 
 ### Safety (Three Layers)
 

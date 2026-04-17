@@ -507,7 +507,7 @@ All pieces are built and wired together (2026-03-27):
 - Web-server handler uses v2 pipeline (engine + executor + `build_context_v2`): **done**
 - Seed data runs at startup (idempotent): **done**
 - iDISK import runs at startup if `IDISK_DATA_DIR` env var points to a valid directory: **done**
-- `IntakeSession` carries traversal state (`visited_questions`, `goal_ask_counts`, `active_profiles`, `disclosed_supplements`, `last_differentiator_count`): **done**
+- `IntakeSession` carries traversal state (`visited_questions`, `goal_ask_counts`, `active_profiles`, `disclosed_supplements`, `last_differentiator_count`, `differentiation_turns`): **done**
 - `IntakePhase::CausationInquiry` added to session phase enum: **done**
 
 ---
@@ -535,8 +535,8 @@ Clinical reasoning engine for the conversational supplement intake interview.
 Six phases: ChiefComplaint → Hpi → ReviewOfSystems → Differentiation → CausationInquiry → Recommendation
 
 Key gates:
-- Medication/supplement disclosure required before any recommendation
-- Auto-recommend when top candidate >30% ahead of #2 AND ≥3 OLDCARTS dimensions filled
+- **Medication chokepoint**: single gate in `next_turn()` — any transition to Recommendation is intercepted and redirected to HPI if `medications_asked` is false. This is enforced regardless of which path triggered the transition.
+- Auto-recommend when candidate confidence ≥0.15 ahead of others OR after 3 Differentiation turns
 - `DoneSharing` signal detection for early phase transitions
 
 ### Safety (Three Layers)
@@ -569,12 +569,15 @@ Axum-based WebSocket server hosting the intake agent.
 - `merge: MergeStore` — synonym resolution
 - `intake_store: IntakeGraphStore` — intake KG (process graph, same DB, `intake_`-prefixed tables)
 - `idisk: IdiskImporter` — iDISK 2.0 data (drug interactions, adverse reactions, mechanisms)
+- `suppkg: Option<Arc<SuppKg>>` — SuppKG citation index (PubMed PMIDs + sentences), loaded if `SUPPKG_PATH` is set
 - `renderer: Arc<dyn LlmProvider>` — expensive conversational LLM (env: RENDERER_PROVIDER/RENDERER_MODEL)
 - `extractor: Arc<dyn LlmProvider>` — cheap extraction LLM (env: EXTRACTOR_PROVIDER/EXTRACTOR_MODEL)
 - `sessions: SessionManager` — rate limiting and session tracking
 - `safety_filter: SafetyFilter` — compiled regex patterns
+- `known_ingredients: Vec<String>` — alphabetically sorted ingredient names cached at startup
+- `archetype_coverage: Vec<ArchetypeCoverage>` — per-archetype coverage strength cached at startup (Strong/Moderate/Weak)
 
-At startup, `init()` seeds the intake graph (idempotent) and optionally imports iDISK data from `IDISK_DATA_DIR`.
+At startup, `init()` seeds the intake graph (idempotent), optionally imports iDISK data from `IDISK_DATA_DIR`, loads SuppKG if `SUPPKG_PATH` is set, and computes archetype coverage via `QueryEngine::coverage_by_archetype()`.
 
 ### Turn Pipeline (v2 — intake KG driven, 10 steps)
 
@@ -599,7 +602,8 @@ Rate limits: max concurrent sessions, daily cap, monthly cap, session timeout. C
 
 JSON messages:
 - **Client → Server:** `{ "type": "message", "text": "..." }`
-- **Server → Client:** `welcome` (session_id), `response` (text + phase + candidates), `emergency`, `denied`, `typing`
+- **Server → Client:** `welcome` (session_id), `response` (text + phase + complete + candidate_count + citations), `emergency`, `denied`, `typing`
+- "What supplements do you know about?" is intercepted before the handler and answered directly from the `known_ingredients` cache — no LLM call required
 
 ---
 

@@ -99,6 +99,41 @@ pub struct EffectResult {
     pub weakest_quality: EdgeQuality,
 }
 
+/// How well the knowledge graph covers a symptom category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoverageStrength {
+    /// 3+ ingredients with paths through this category's systems.
+    Strong,
+    /// 1–2 ingredients.
+    Moderate,
+    /// No ingredients found.
+    Weak,
+}
+
+impl CoverageStrength {
+    pub fn label(&self) -> &'static str {
+        match self {
+            CoverageStrength::Strong => "strong",
+            CoverageStrength::Moderate => "moderate",
+            CoverageStrength::Weak => "weak",
+        }
+    }
+}
+
+/// Coverage summary for one symptom archetype (e.g. "Sleep", "Digestive").
+#[derive(Debug, Clone)]
+pub struct ArchetypeCoverage {
+    pub archetype_id: String,
+    pub archetype_name: String,
+    pub strength: CoverageStrength,
+    /// Number of distinct ingredients with at least one path through this category.
+    pub ingredient_count: usize,
+    /// Total number of traversal paths found across all systems in this category.
+    pub path_count: usize,
+    /// Average confidence of all edges found, or 0.0 if none.
+    pub avg_confidence: f64,
+}
+
 /// Named traversal patterns through the ontology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecommendationPattern {
@@ -1077,6 +1112,93 @@ impl<'a> QueryEngine<'a> {
         } else {
             EdgeQuality::Deduced
         }
+    }
+
+    /// Compute coverage strength for each symptom archetype.
+    ///
+    /// For each archetype, queries all its default systems in the supplement KG
+    /// and aggregates ingredient count, path count, and average confidence.
+    /// Returns one `ArchetypeCoverage` per archetype, sorted strongest first.
+    pub async fn coverage_by_archetype(
+        &self,
+        archetypes: &[crate::intake::types::ArchetypeProfile],
+    ) -> Vec<ArchetypeCoverage> {
+        // Use a permissive config — we want to know what's there, not filter it
+        let config = QueryConfig {
+            lens: ComplexityLens::fifth_grade(),
+            min_quality: None,
+            min_confidence: None,
+            max_depth: 4,
+            max_paths_per_result: 10,
+        };
+
+        let mut results = Vec::new();
+
+        for archetype in archetypes {
+            let mut seen_ingredients: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut total_paths: usize = 0;
+            let mut confidence_sum: f64 = 0.0;
+            let mut confidence_count: usize = 0;
+
+            for system_name in &archetype.default_systems {
+                let system_results = self.ingredients_for_system(system_name, &config).await;
+                for r in &system_results {
+                    seen_ingredients.insert(r.ingredient.name.clone());
+                    total_paths += r.paths.len();
+                    for path in &r.paths {
+                        // Average the confidences of all edges in this path
+                        let edge_confidences: Vec<f64> = path.steps.iter().filter_map(|s| {
+                            if let PathStep::Edge { data, .. } = s {
+                                Some(data.metadata.confidence)
+                            } else {
+                                None
+                            }
+                        }).collect();
+                        if !edge_confidences.is_empty() {
+                            let path_avg = edge_confidences.iter().sum::<f64>() / edge_confidences.len() as f64;
+                            confidence_sum += path_avg;
+                            confidence_count += 1;
+                        }
+                    }
+                }
+            }
+
+            let ingredient_count = seen_ingredients.len();
+            let avg_confidence = if confidence_count > 0 {
+                confidence_sum / confidence_count as f64
+            } else {
+                0.0
+            };
+
+            let strength = match ingredient_count {
+                0 => CoverageStrength::Weak,
+                1 | 2 => CoverageStrength::Moderate,
+                _ => CoverageStrength::Strong,
+            };
+
+            results.push(ArchetypeCoverage {
+                archetype_id: archetype.id.clone(),
+                archetype_name: archetype.name.clone(),
+                strength,
+                ingredient_count,
+                path_count: total_paths,
+                avg_confidence,
+            });
+        }
+
+        // Sort: Strong first, then Moderate, then Weak; within tier by ingredient count desc
+        results.sort_by(|a, b| {
+            let tier_order = |s: &CoverageStrength| match s {
+                CoverageStrength::Strong => 0,
+                CoverageStrength::Moderate => 1,
+                CoverageStrength::Weak => 2,
+            };
+            tier_order(&a.strength)
+                .cmp(&tier_order(&b.strength))
+                .then(b.ingredient_count.cmp(&a.ingredient_count))
+        });
+
+        results
     }
 }
 

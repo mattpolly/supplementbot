@@ -6,6 +6,7 @@ use graph_service::intake::idisk::IdiskImporter;
 use graph_service::intake::seed::seed_intake_graph;
 use graph_service::intake::store::IntakeGraphStore;
 use graph_service::merge::MergeStore;
+use graph_service::query::{ArchetypeCoverage, QueryEngine};
 use graph_service::source::SourceStore;
 use intake_agent::safety::SafetyFilter;
 use llm_client::provider::LlmProvider;
@@ -44,6 +45,12 @@ pub struct AppStateInner {
     /// SuppKG — in-memory citation index (PubMed PMIDs + sentences).
     /// None if SUPPKG_PATH is not set or file not found.
     pub suppkg: Option<Arc<SuppKg>>,
+    /// Alphabetically sorted list of ingredient names the graph knows about.
+    /// Cached at startup — ingredients are added offline, not at runtime.
+    pub known_ingredients: Vec<String>,
+    /// Coverage strength per symptom archetype, sorted Strong → Moderate → Weak.
+    /// Cached at startup for use in the opening greeting.
+    pub archetype_coverage: Vec<ArchetypeCoverage>,
 }
 
 impl AppState {
@@ -128,9 +135,23 @@ impl AppState {
 
         let node_count = graph.node_count().await;
         let edge_count = graph.edge_count().await;
+        let known_ingredients = graph.known_ingredients().await;
+
+        // Compute per-archetype coverage at startup (query-only, no DB writes)
+        let query_engine = QueryEngine::new(&graph, &source, &merge).await;
+        let archetypes = intake_store.all_archetypes().await;
+        let archetype_coverage = query_engine.coverage_by_archetype(&archetypes).await;
+        let strong_count = archetype_coverage.iter().filter(|c| c.strength == graph_service::query::CoverageStrength::Strong).count();
+        let moderate_count = archetype_coverage.iter().filter(|c| c.strength == graph_service::query::CoverageStrength::Moderate).count();
+
         eprintln!(
-            "  graph loaded: {} nodes, {} edges",
-            node_count, edge_count
+            "  graph loaded: {} nodes, {} edges, {} ingredients",
+            node_count, edge_count, known_ingredients.len()
+        );
+        eprintln!(
+            "  coverage: {}/{} archetypes strong, {}/{} moderate",
+            strong_count, archetype_coverage.len(),
+            moderate_count, archetype_coverage.len()
         );
         eprintln!(
             "  renderer: {} ({})",
@@ -155,6 +176,8 @@ impl AppState {
                 intake_store,
                 idisk,
                 suppkg,
+                known_ingredients,
+                archetype_coverage,
             }),
         }
     }

@@ -125,6 +125,8 @@ enum QueryType {
         /// The ingredient to look up (e.g. "magnesium")
         name: String,
     },
+    /// List all ingredients the graph has been trained on
+    List,
 }
 
 fn default_db_path() -> String {
@@ -312,6 +314,21 @@ async fn run_query(
     println!();
 
     match query_type {
+        QueryType::List => {
+            let ingredients = graph.known_ingredients().await;
+            if ingredients.is_empty() {
+                println!("  No ingredients found. Run an ingestion first.");
+            } else {
+                println!("─── Known Ingredients ({}) ──────────────────────────", ingredients.len());
+                println!();
+                for name in &ingredients {
+                    println!("  • {}", name);
+                }
+                println!();
+            }
+            return;
+        }
+
         QueryType::Symptom { name } => {
             println!("─── Ingredients for symptom: {} ─────────────────────", name);
             println!();

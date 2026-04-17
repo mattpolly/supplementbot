@@ -177,7 +177,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
     let _ = send_json(&mut socket, &ServerMessage::typing()).await;
     let opening = generate_opening(&state, &session_id).await;
     let opening_result = opening.unwrap_or_else(|| TurnResult {
-        response: "Hello! Welcome to SupplementBot. What brings you in today?".to_string(),
+        response: "Hello! Welcome to SupplementBot — I'm currently under construction, but I'd love to try to help. What brings you in today?".to_string(),
         phase: "chief_complaint".to_string(),
         emergency: false,
         complete: false,
@@ -206,6 +206,32 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
 
                 // Send typing indicator
                 let _ = send_json(&mut socket, &ServerMessage::typing()).await;
+
+                // Intercept "what supplements do you know about?" before the intake handler.
+                if is_asking_about_known_supplements(&client_msg.text) {
+                    let ingredients = &state.inner.known_ingredients;
+                    let reply = if ingredients.is_empty() {
+                        "I haven't been trained on any specific supplements yet — my knowledge graph is still being built.".to_string()
+                    } else {
+                        let list = ingredients.join(", ");
+                        format!(
+                            "I've done research on {} supplement{}: {}. What symptoms or concerns can I help you with today?",
+                            ingredients.len(),
+                            if ingredients.len() == 1 { "" } else { "s" },
+                            list
+                        )
+                    };
+                    let result = TurnResult {
+                        response: reply,
+                        phase: "chief_complaint".to_string(),
+                        emergency: false,
+                        complete: false,
+                        candidate_count: 0,
+                        citations: vec![],
+                    };
+                    let _ = send_json(&mut socket, &ServerMessage::from_turn(&result)).await;
+                    continue;
+                }
 
                 // Process the turn
                 match handler::process_turn(&state, &sid, &client_msg.text).await {
@@ -239,16 +265,39 @@ async fn generate_opening(state: &AppState, session_id: &Uuid) -> Option<TurnRes
         intake_agent::context::build_context(session, &[], &[])
     }).await?;
 
-    let request = llm_client::provider::CompletionRequest::new("(Patient has just connected. Greet them briefly and ask what brings them in today. Two sentences max.)")
+    // Build a brief coverage hint for the opening prompt
+    let coverage_hint = {
+        use graph_service::query::CoverageStrength;
+        let strong: Vec<&str> = s.archetype_coverage
+            .iter()
+            .filter(|c| c.strength == CoverageStrength::Strong)
+            .map(|c| c.archetype_name.as_str())
+            .collect();
+        if strong.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " My research is strongest in: {}.",
+                strong.join(", ")
+            )
+        }
+    };
+
+    let prompt = format!(
+        "(Patient has just connected. Greet them warmly. Mention that you are currently under construction but would love to try to help.{} Then ask what brings them in today. Three sentences max.)",
+        coverage_hint
+    );
+
+    let request = llm_client::provider::CompletionRequest::new(&prompt)
         .with_system(intake_context.system_prompt)
-        .with_max_tokens(100)
+        .with_max_tokens(120)
         .with_temperature(0.7);
 
     let response = match s.renderer.complete(request).await {
         Ok(resp) => resp.content,
         Err(e) => {
             eprintln!("[session {session_id}] opening error: {e}");
-            "Hello! Welcome. What brings you in today?".to_string()
+            "Hello! Welcome to SupplementBot — I'm currently under construction, but I'd love to try to help. What brings you in today?".to_string()
         }
     };
 
@@ -274,4 +323,14 @@ async fn generate_opening(state: &AppState, session_id: &Uuid) -> Option<TurnRes
 async fn send_json(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), axum::Error> {
     let text = serde_json::to_string(msg).unwrap();
     socket.send(Message::Text(text.into())).await
+}
+
+/// Returns true if the user's message is asking what supplements the bot knows about.
+fn is_asking_about_known_supplements(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let supplement_words = ["supplement", "supplements", "ingredient", "ingredients", "nutraceutical"];
+    let knowledge_words = ["know", "studied", "research", "trained", "have data", "cover", "support", "list"];
+    let has_supplement = supplement_words.iter().any(|w| lower.contains(w));
+    let has_knowledge = knowledge_words.iter().any(|w| lower.contains(w));
+    has_supplement && has_knowledge
 }

@@ -155,6 +155,28 @@ impl KnowledgeGraph {
         records.into_iter().map(|r| NodeIndex(r.id)).collect()
     }
 
+    /// Return all ingredient names the graph has been trained on, sorted alphabetically.
+    pub async fn known_ingredients(&self) -> Vec<String> {
+        let mut result = self
+            .db
+            .query("SELECT name FROM node WHERE node_type = $nt ORDER BY name ASC")
+            .bind(("nt", NodeType::Ingredient))
+            .await
+            .unwrap();
+        let records: Vec<serde_json::Value> = result.take(0).unwrap_or_default();
+        records
+            .into_iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(|s| {
+                // Title-case the name for display (e.g. "magnesium" → "Magnesium")
+                let mut c = s.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                }
+            }))
+            .collect()
+    }
+
     /// Find a node by name, falling back to alias resolution if not found directly.
     pub async fn find_node_or_alias(
         &self,
