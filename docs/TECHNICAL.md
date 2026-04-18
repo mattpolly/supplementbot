@@ -151,17 +151,20 @@ Custom values work: `ComplexityLens::new(0.35)` sees `contraindicated_with` (0.3
 
 **Crate:** `graph-service` — `crates/graph-service/src/graph.rs`
 
-Backed by **SurrealDB embedded** (RocksDB storage engine). The graph persists to disk at `~/.supplementbot/graph` by default. No external server needed — the database runs in-process.
+Backed by **SurrealDB server** (RocksDB storage engine). The graph is served by a dedicated `surrealdb` systemd service and accessed over WebSocket. Both the CLI and web server connect as clients — no file locking, concurrent reads and writes work correctly.
+
+Connection is configured via environment variables: `DB_URL` (default `ws://localhost:8000`), `DB_USER`, `DB_PASS`. These are set in `.env` and picked up by both binaries at startup.
 
 Nodes are stored as SurrealDB records in the `node` table. Edges are stored as SurrealDB graph relations using `RELATE node:src->edge->node:tgt`. This gives us native graph traversal capabilities and persistence for free.
 
 ### Key Operations
 
-All graph operations are **async** since they hit the embedded database.
+All graph operations are **async** since they go over the WebSocket connection.
 
 | Method | Description |
 |--------|-------------|
-| `KnowledgeGraph::open(path)` | Open or create a persistent graph at the given path |
+| `KnowledgeGraph::open(url, user, pass)` | Connect to the SurrealDB server |
+| `KnowledgeGraph::open_embedded(path)` | Open an embedded RocksDB graph (migrate command only) |
 | `KnowledgeGraph::in_memory()` | Create an in-memory graph (for tests) |
 | `add_node(NodeData)` | Adds or returns existing (deduplicates by slugified name) |
 | `find_node(&str)` | Case-insensitive lookup by slugified name |
@@ -187,12 +190,30 @@ Nodes are deduplicated by slugified lowercase name (spaces → underscores, non-
 
 ### Persistence Model
 
-The graph database lives in a directory on disk (RocksDB). Running the CLI multiple times with different nutraceuticals builds up the same graph:
+The graph database lives at `/srv/www/supplementbot/data/graph-server`, owned by the `surrealdb` systemd service. The service starts before `supplementbot-web` and must be running for either binary to connect.
+
+Running the CLI multiple times with different nutraceuticals builds up the same graph — the web server sees new ingredients immediately without restart:
 
 ```bash
-cargo run --bin supplementbot -- -n Magnesium -p anthropic   # creates graph
-cargo run --bin supplementbot -- -n Zinc -p anthropic         # loads + extends graph
-# Second run sees Magnesium's nodes and finds cross-ingredient patterns
+cargo run --bin supplementbot -- -n Magnesium -p anthropic   # ingests into server
+cargo run --bin supplementbot -- -n Zinc -p anthropic         # adds to same graph
+# Web server sees both immediately; no restart needed
+```
+
+### Data Migration
+
+If moving from an older embedded RocksDB graph to server mode, use the migrate subcommand:
+
+```bash
+supplementbot migrate --from /path/to/old/embedded/graph
+```
+
+This opens the embedded graph directly, connects to the server via `DB_URL`/`DB_USER`/`DB_PASS`, and copies all tables: `node`, `edge`, `node_source`, `edge_source`, `node_alias`, `node_cui`. Intake KG and iDISK data are excluded — both regenerate at startup.
+
+Note: `surreal start file://` uses a different internal format than the embedded Rust SDK. Use `rocksdb://` as the path scheme when starting the server:
+
+```bash
+surreal start --username root --password <pass> rocksdb:///path/to/data
 ```
 
 ---
@@ -564,17 +585,16 @@ Axum-based WebSocket server hosting the intake agent.
 
 ### Shared State (`AppState`)
 
-- `graph: KnowledgeGraph` — supplement KG (persisted to disk)
+- `graph: KnowledgeGraph` — supplement KG (connected to SurrealDB server)
 - `source: SourceStore` — edge quality metadata
 - `merge: MergeStore` — synonym resolution
-- `intake_store: IntakeGraphStore` — intake KG (process graph, same DB, `intake_`-prefixed tables)
+- `intake_store: IntakeGraphStore` — intake KG (process graph, same DB connection, `intake_`-prefixed tables)
 - `idisk: IdiskImporter` — iDISK 2.0 data (drug interactions, adverse reactions, mechanisms)
 - `suppkg: Option<Arc<SuppKg>>` — SuppKG citation index (PubMed PMIDs + sentences), loaded if `SUPPKG_PATH` is set
 - `renderer: Arc<dyn LlmProvider>` — expensive conversational LLM (env: RENDERER_PROVIDER/RENDERER_MODEL)
 - `extractor: Arc<dyn LlmProvider>` — cheap extraction LLM (env: EXTRACTOR_PROVIDER/EXTRACTOR_MODEL)
 - `sessions: SessionManager` — rate limiting and session tracking
 - `safety_filter: SafetyFilter` — compiled regex patterns
-- `known_ingredients: Vec<String>` — alphabetically sorted ingredient names cached at startup
 - `archetype_coverage: Vec<ArchetypeCoverage>` — per-archetype coverage strength cached at startup (Strong/Moderate/Weak)
 
 At startup, `init()` seeds the intake graph (idempotent), optionally imports iDISK data from `IDISK_DATA_DIR`, loads SuppKG if `SUPPKG_PATH` is set, and computes archetype coverage via `QueryEngine::coverage_by_archetype()`.
@@ -603,7 +623,7 @@ Rate limits: max concurrent sessions, daily cap, monthly cap, session timeout. C
 JSON messages:
 - **Client → Server:** `{ "type": "message", "text": "..." }`
 - **Server → Client:** `welcome` (session_id), `response` (text + phase + complete + candidate_count + citations), `emergency`, `denied`, `typing`
-- "What supplements do you know about?" is intercepted before the handler and answered directly from the `known_ingredients` cache — no LLM call required
+- "What supplements do you know about?" is intercepted before the handler and answered by querying `graph.known_ingredients()` live — always current, no restart needed after ingestion
 
 ---
 

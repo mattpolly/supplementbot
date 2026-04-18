@@ -515,15 +515,27 @@ The SurrealDB migration replaced the entire storage layer (petgraph → SurrealD
 
 Had we waited until 10 crates and 5000 lines, this would have been painful. The lesson: when you know a fundamental capability is needed (persistence), do it now while it's cheap.
 
-### SurrealDB embedded is the right choice for this project
+### SurrealDB server mode is the right choice once you have a production web server
 
-SurrealDB's embedded mode (RocksDB backend) gives us:
-- **No infrastructure** — single directory on disk, no server to run
-- **Native graph relations** — `RELATE` statement maps perfectly to our edge model
-- **Full SurrealQL** — the same query language works whether embedded or server-deployed
-- **In-memory mode for tests** — `Mem` backend keeps tests fast and isolated
+We started with embedded RocksDB (single directory, no server needed) which was fine during development. Once the web server ran 24/7 as a systemd service, embedded became a liability: RocksDB uses an exclusive file lock, so the CLI couldn't connect while the web server was up. That meant no ingestion without taking the service down.
+
+The fix: switch to SurrealDB server mode. The server owns the lock; both the CLI and web server connect as clients over WebSocket. Concurrent reads and writes work correctly. New ingredients ingested via CLI appear in the web server immediately — no restart needed.
 
 The `RELATE` model is a natural fit because our edges already have typed metadata. A SurrealDB relation is `node:src->edge->node:tgt` with arbitrary fields — exactly our `EdgeData` with `edge_type` and `metadata`.
+
+### `surreal start file://` and the embedded SDK use different storage formats
+
+`surreal start file:///path` fails with "Unable to load datastore" on directories written by the embedded Rust SDK (`Surreal::new::<RocksDb>(path)`). They both use RocksDB internally but with different key encodings. Use `rocksdb://` as the path scheme for `surreal start` to get the RocksDB backend:
+
+```bash
+surreal start --username root --password <pass> rocksdb:///path/to/data
+```
+
+This also means migrating from embedded to server mode requires a data export/import step — you can't just point the server at the existing directory. The `supplementbot migrate --from <path>` command handles this by opening the embedded DB via the Rust SDK and writing to the server over WebSocket.
+
+### RecordId serialization breaks raw RELATE in migrations
+
+When migrating edges, don't try to RELATE using raw JSON-serialized RecordIds as bindings. SurrealDB's JSON representation of a RecordId doesn't round-trip cleanly through `$binding` in a RELATE statement. Instead, use the typed `KnowledgeGraph` API: read edges with `all_edges()` (returns typed `NodeIndex` handles), look up destination nodes by name with `find_node()`, then call `add_edge()`. This avoids the serialization layer entirely.
 
 ### First SurrealDB compile is brutal, incrementals are fine
 
