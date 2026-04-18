@@ -358,10 +358,17 @@ impl SourceStore {
             .unwrap();
         let records: Vec<QualityGroupedEdge> = result.take(0).unwrap_or_default();
 
-        // Build set of edges that have citations
+        // Build set of edges that have citations — project only the 3 key fields
+        // to avoid fetching all 300k+ citation records over the WebSocket.
+        #[derive(serde::Deserialize, SurrealValue)]
+        struct CitedEdgeKey { source_node: String, target_node: String, edge_type: String }
         let cited: std::collections::HashSet<(String, String, String)> = self
-            .all_citations()
+            .db
+            .query("SELECT source_node, target_node, edge_type FROM edge_citation GROUP BY source_node, target_node, edge_type")
             .await
+            .ok()
+            .and_then(|mut r| r.take::<Vec<CitedEdgeKey>>(0).ok())
+            .unwrap_or_default()
             .into_iter()
             .map(|c| (c.source_node, c.target_node, c.edge_type))
             .collect();
