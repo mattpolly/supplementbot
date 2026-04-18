@@ -552,7 +552,23 @@ async fn seed_questions(store: &IntakeGraphStore) {
             template: "Is it more of an ache, a sharp pain, cramping, or something else?".into(),
             oldcarts_dimension: Some(OldcartsDimension::Character),
         },
-        // Medication check
+        // Safety checklist questions — must be asked explicitly before recommendation
+        QuestionTemplate {
+            id: "ask_prescriptions".into(),
+            template: "Are you currently taking any prescription medications?".into(),
+            oldcarts_dimension: None,
+        },
+        QuestionTemplate {
+            id: "ask_otc_supplements".into(),
+            template: "Are you taking any over-the-counter medications or supplements right now?".into(),
+            oldcarts_dimension: None,
+        },
+        QuestionTemplate {
+            id: "ask_health_conditions".into(),
+            template: "Do you have any health conditions I should know about — things like pregnancy, kidney or liver disease, or a history of heart problems?".into(),
+            oldcarts_dimension: None,
+        },
+        // Legacy — kept for backwards compat with any existing sessions
         QuestionTemplate {
             id: "ask_medications".into(),
             template: "Are you currently taking any prescription medications or other supplements?".into(),

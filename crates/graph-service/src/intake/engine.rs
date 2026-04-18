@@ -44,8 +44,14 @@ pub struct TraversalContext {
     pub top_score: f64,
     /// Systems already reviewed.
     pub reviewed_systems: HashSet<String>,
-    /// Whether medications have been asked about.
-    pub medications_asked: bool,
+    /// Safety checklist state — which required touchpoints are complete.
+    pub checklist_complete: bool,
+    /// Next required checklist question template ID (None if checklist done or only contraindication check remains).
+    pub checklist_next_question: Option<&'static str>,
+    /// True when all three prerequisite questions asked — contraindication check can run.
+    pub contraindications_ready: bool,
+    /// Whether contraindication check has run.
+    pub contraindications_checked: bool,
     /// Whether user disclosed any medications.
     pub medications_disclosed: bool,
     /// Whether the user just signaled disengagement.
@@ -81,10 +87,13 @@ impl<'a> IntakeEngine<'a> {
 
         // Step 1: Check if we should transition stages
         if let Some(mut next) = self.evaluate_transition(ctx, &mut trace).await {
-            // Policy gate: Recommendation is NEVER reachable without medications asked.
+            // Policy gate: Recommendation is NEVER reachable until checklist is complete.
             // This is the single enforcement point — no path bypasses this check.
-            if next == IntakeStageId::Recommendation && !ctx.medications_asked {
-                trace.push("GATE: Recommendation blocked — medications not yet asked → HPI".into());
+            if next == IntakeStageId::Recommendation && !ctx.checklist_complete {
+                trace.push(format!(
+                    "GATE: Recommendation blocked — checklist incomplete (next: {:?}) → HPI",
+                    ctx.checklist_next_question
+                ));
                 next = IntakeStageId::Hpi;
             }
             return TurnAction {
@@ -140,17 +149,17 @@ impl<'a> IntakeEngine<'a> {
                 if ctx.candidate_count > 0
                     && ctx.confidence_gap > 0.15
                     && ctx.filled_count >= 2
-                    && ctx.medications_asked
+                    && ctx.checklist_complete
                 {
-                    trace.push("Confident candidates + medications asked → Recommendation".into());
+                    trace.push("Confident candidates + checklist complete → Recommendation".into());
                     return Some(IntakeStageId::Recommendation);
                 }
 
                 // User done sharing
                 if ctx.user_done_sharing && ctx.candidate_count > 0 {
-                    if !ctx.medications_asked {
-                        trace.push("User done but medications not asked — staying for med check".into());
-                        return None; // Force medication question
+                    if !ctx.checklist_complete {
+                        trace.push("User done but checklist incomplete — staying for safety questions".into());
+                        return None;
                     }
                     trace.push("User done sharing → Recommendation".into());
                     return Some(IntakeStageId::Recommendation);
@@ -158,10 +167,10 @@ impl<'a> IntakeEngine<'a> {
 
                 // User done sharing but no candidates — still go to Recommendation
                 // so the renderer can honestly say nothing was found.
-                // BUT: medications must be asked first regardless — safety gate is unconditional.
+                // Checklist must be complete first — safety gate is unconditional.
                 if ctx.user_done_sharing && ctx.candidate_count == 0 {
-                    if !ctx.medications_asked {
-                        trace.push("User done sharing (no candidates), medications not asked — staying for med check".into());
+                    if !ctx.checklist_complete {
+                        trace.push("User done sharing (no candidates), checklist incomplete — staying for safety questions".into());
                         return None;
                     }
                     trace.push("User done sharing, no candidates → Recommendation (empty)".into());
@@ -183,16 +192,16 @@ impl<'a> IntakeEngine<'a> {
                         } else if ctx.differentiator_count > 0 {
                             trace.push("OLDCARTS sufficient, systems done → Differentiation".into());
                             return Some(IntakeStageId::Differentiation);
-                        } else if ctx.medications_asked {
-                            trace.push("OLDCARTS sufficient, no diff, meds asked → Recommendation".into());
+                        } else if ctx.checklist_complete {
+                            trace.push("OLDCARTS sufficient, no diff, checklist complete → Recommendation".into());
                             return Some(IntakeStageId::Recommendation);
                         }
                     } else {
                         // OLDCARTS sufficient but still no candidates — go to recommendation
                         // so the renderer can honestly say nothing was found.
-                        // Medications must still be asked first — safety gate is unconditional.
-                        if !ctx.medications_asked {
-                            trace.push("OLDCARTS sufficient, no candidates, medications not asked — staying for med check".into());
+                        // Checklist must be complete first — safety gate is unconditional.
+                        if !ctx.checklist_complete {
+                            trace.push("OLDCARTS sufficient, no candidates, checklist incomplete — staying for safety questions".into());
                         } else {
                             trace.push("OLDCARTS sufficient, no candidates → Recommendation (empty)".into());
                             return Some(IntakeStageId::Recommendation);
@@ -201,15 +210,15 @@ impl<'a> IntakeEngine<'a> {
                 }
 
                 // User disengaged
-                if ctx.user_disengaged && ctx.candidate_count > 0 && ctx.medications_asked {
+                if ctx.user_disengaged && ctx.candidate_count > 0 && ctx.checklist_complete {
                     trace.push("User disengaged → Recommendation".into());
                     return Some(IntakeStageId::Recommendation);
                 }
 
                 // User disengaged with no candidates
                 if ctx.user_disengaged && ctx.candidate_count == 0 {
-                    if !ctx.medications_asked {
-                        trace.push("User disengaged (no candidates), medications not asked — staying for med check".into());
+                    if !ctx.checklist_complete {
+                        trace.push("User disengaged (no candidates), checklist incomplete — staying for safety questions".into());
                         return None;
                     }
                     trace.push("User disengaged, no candidates → Recommendation (empty)".into());
@@ -225,9 +234,8 @@ impl<'a> IntakeEngine<'a> {
                     if ctx.differentiator_count > 0 && !dominant {
                         trace.push("Systems reviewed → Differentiation".into());
                         return Some(IntakeStageId::Differentiation);
-                    } else if !ctx.medications_asked {
-                        // Safety gate — must ask about medications before recommending
-                        trace.push("Systems reviewed, medications not asked → HPI for med check".into());
+                    } else if !ctx.checklist_complete {
+                        trace.push("Systems reviewed, checklist incomplete → HPI for safety questions".into());
                         return Some(IntakeStageId::Hpi);
                     } else {
                         trace.push("Systems reviewed → Recommendation".into());
@@ -246,11 +254,10 @@ impl<'a> IntakeEngine<'a> {
                     if ctx.medications_disclosed {
                         trace.push("Differentiation done, meds disclosed → CausationInquiry".into());
                         return Some(IntakeStageId::CausationInquiry);
-                    } else if !ctx.medications_asked {
-                        // Safety gate — must ask about medications before recommending
-                        trace.push("Differentiation done, medications not asked → HPI for med check".into());
+                    } else if !ctx.checklist_complete {
+                        trace.push("Differentiation done, checklist incomplete → HPI for safety questions".into());
                         return Some(IntakeStageId::Hpi);
-                    } else if ctx.medications_asked {
+                    } else {
                         trace.push("Differentiation done → Recommendation".into());
                         return Some(IntakeStageId::Recommendation);
                     }
@@ -346,21 +353,23 @@ impl<'a> IntakeEngine<'a> {
         ctx: &TraversalContext,
         trace: &mut Vec<String>,
     ) -> Option<ResolvedQuestion> {
-        // First check: do we need to ask about medications? (safety gate)
-        if !ctx.medications_asked
-            && ctx.candidate_count > 0
-            && !ctx.visited_questions.contains("ask_medications")
-        {
-            // Check if we've asked enough OLDCARTS to warrant the medication question
-            if ctx.filled_count >= 2 {
-                let q = self.store.get_question("ask_medications").await?;
-                trace.push("Safety gate: medication check needed".into());
-                return Some(ResolvedQuestion {
-                    template_id: "ask_medications".into(),
-                    text: q.template,
-                    goal_id: "check_medications".into(),
-                    score: 10.0, // Always highest priority
-                });
+        // Checklist gate: force the next required safety question before anything else.
+        // Triggered once we have ≥2 OLDCARTS dims filled (enough context to be useful).
+        // Questions are forced in order: prescriptions → otc/supplements → health conditions.
+        // Contraindication check is handled separately after all three are asked.
+        if !ctx.checklist_complete && ctx.filled_count >= 2 {
+            if let Some(template_id) = ctx.checklist_next_question {
+                if !ctx.visited_questions.contains(template_id) {
+                    if let Some(q) = self.store.get_question(template_id).await {
+                        trace.push(format!("Safety checklist: forcing {}", template_id));
+                        return Some(ResolvedQuestion {
+                            template_id: template_id.to_string(),
+                            text: q.template,
+                            goal_id: "safety_checklist".into(),
+                            score: 10.0, // Always highest priority
+                        });
+                    }
+                }
             }
         }
 
@@ -741,12 +750,16 @@ mod tests {
             confidence_gap: 0.0,
             top_score: 0.0,
             reviewed_systems: HashSet::new(),
-            medications_asked: false,
+            checklist_complete: false,
+            checklist_next_question: Some("ask_prescriptions"),
+            contraindications_ready: false,
+            contraindications_checked: false,
             medications_disclosed: false,
             user_disengaged: false,
             user_done_sharing: false,
             differentiator_count: 0,
             chief_complaint: None,
+            differentiation_turns: 0,
         }
     }
 
@@ -827,21 +840,22 @@ mod tests {
         ctx.active_profiles.push("muscle_cramps".into());
         ctx.candidate_count = 3;
         ctx.filled_count = 5; // Enough to trigger transition
-        ctx.medications_asked = false;
+        ctx.checklist_complete = false;
+        ctx.checklist_next_question = Some("ask_prescriptions");
         ctx.differentiator_count = 2;
         ctx.chief_complaint = Some("muscle cramps".into());
 
         // Even though OLDCARTS is sufficient and there are candidates,
-        // the engine should NOT transition to system_review because
-        // we haven't asked about medications yet. It should ask about meds.
+        // the engine should NOT transition to recommendation because
+        // the checklist is incomplete. It should ask a safety question.
         let action = engine.next_turn(&ctx).await;
 
-        // Either it stays in HPI and asks about meds, or transitions
-        // but the medication question should come up
+        // Either it stays in HPI and asks a checklist question, or transitions
+        // but must NOT go to Recommendation
         if action.next_stage.is_none() {
-            // Good — stayed to ask medication question
+            // Good — stayed to ask safety question
             let q = action.question.unwrap();
-            assert_eq!(q.template_id, "ask_medications");
+            assert_eq!(q.template_id, "ask_prescriptions");
         }
         // If it transitions, it should NOT go to Recommendation
         if let Some(next) = &action.next_stage {

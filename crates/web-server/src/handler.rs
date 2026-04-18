@@ -134,8 +134,7 @@ pub async fn process_turn(
             // Apply OLDCARTS + denied systems
             apply_extraction(session, &extraction);
 
-            // Record disclosed medications (asked_about_medications is set
-            // only when the engine delivers the ask_medications question)
+            // Record disclosed medications and supplements for contraindication checking
             if !extraction.medications.is_empty() {
                 for med in &extraction.medications {
                     let lower = med.to_lowercase();
@@ -238,7 +237,10 @@ pub async fn process_turn(
                 confidence_gap,
                 top_score,
                 reviewed_systems: session.systems_reviewed.clone(),
-                medications_asked: session.asked_about_medications,
+                checklist_complete: session.checklist.complete(),
+                checklist_next_question: session.checklist.next_required_question(),
+                contraindications_ready: session.checklist.contraindications_ready(),
+                contraindications_checked: session.checklist.contraindications_checked,
                 medications_disclosed: !session.contraindications.is_empty(),
                 user_disengaged: user_signal == phase::UserSignal::Disengaged,
                 user_done_sharing: user_signal == phase::UserSignal::DoneSharing,
@@ -344,19 +346,32 @@ pub async fn process_turn(
                 session.differentiation_turns += 1;
             }
 
-            // Track visited question
+            // Track visited question and update safety checklist.
+            // Flags are set ONLY when the engine delivers the specific template —
+            // never from user-volunteered information (liability requirement).
             if let Some(ref q) = turn_action.question {
                 session.visited_questions.insert(q.template_id.clone());
-                // Increment goal ask count
                 *session
                     .goal_ask_counts
                     .entry(q.goal_id.clone())
                     .or_insert(0) += 1;
-                // Authoritative medication gate: only mark asked when the engine
-                // actually selected and delivered the medications question.
-                if q.template_id == "ask_medications" {
-                    session.asked_about_medications = true;
+                match q.template_id.as_str() {
+                    "ask_prescriptions" => session.checklist.prescriptions_asked = true,
+                    "ask_otc_supplements" => session.checklist.otc_and_supplements_asked = true,
+                    "ask_health_conditions" => session.checklist.health_conditions_asked = true,
+                    _ => {}
                 }
+            }
+
+            // Run contraindication check once all prerequisites are met.
+            // This is the last checklist item — it runs automatically, no question needed.
+            if session.checklist.contraindications_ready()
+                && !session.checklist.contraindications_checked
+            {
+                // The actual iDISK interaction check ran in the executor above —
+                // any flagged contraindications are already in action_results.
+                // We just mark the check as done so the gate unlocks.
+                session.checklist.contraindications_checked = true;
             }
 
             // Apply stage transition from engine

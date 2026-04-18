@@ -137,6 +137,58 @@ impl ChiefComplaint {
     }
 }
 
+/// Required safety touchpoints that must be completed before a recommendation
+/// can be unlocked. Every flag is set only when the bot explicitly asks the
+/// corresponding question — never from user-volunteered information alone.
+/// Partial ordering: contraindications_checked requires all three preceding
+/// flags to be true first.
+#[derive(Debug, Clone, Default)]
+pub struct IntakeChecklist {
+    /// Bot explicitly asked about current prescription medications.
+    pub prescriptions_asked: bool,
+    /// Bot explicitly asked about OTC medications and other supplements.
+    pub otc_and_supplements_asked: bool,
+    /// Bot explicitly asked about relevant health conditions (pregnancy, kidney
+    /// disease, etc.).
+    pub health_conditions_asked: bool,
+    /// Contraindication check has been run against all disclosed inputs.
+    /// Only valid after the three prerequisites above are true.
+    pub contraindications_checked: bool,
+}
+
+impl IntakeChecklist {
+    /// True when all prerequisites for a recommendation are satisfied.
+    pub fn complete(&self) -> bool {
+        self.prescriptions_asked
+            && self.otc_and_supplements_asked
+            && self.health_conditions_asked
+            && self.contraindications_checked
+    }
+
+    /// True when all three prerequisite questions have been asked,
+    /// meaning the contraindication check is now allowed to run.
+    pub fn contraindications_ready(&self) -> bool {
+        self.prescriptions_asked
+            && self.otc_and_supplements_asked
+            && self.health_conditions_asked
+    }
+
+    /// Returns the template ID of the next unchecked required question,
+    /// or None if complete (contraindication check is handled separately).
+    pub fn next_required_question(&self) -> Option<&'static str> {
+        if !self.prescriptions_asked {
+            return Some("ask_prescriptions");
+        }
+        if !self.otc_and_supplements_asked {
+            return Some("ask_otc_supplements");
+        }
+        if !self.health_conditions_asked {
+            return Some("ask_health_conditions");
+        }
+        None
+    }
+}
+
 /// The full state of one intake conversation.
 #[derive(Debug)]
 pub struct IntakeSession {
@@ -156,8 +208,8 @@ pub struct IntakeSession {
     pub turn_summary: Option<String>,
     /// Disclosed conditions/medications (for contraindication filtering)
     pub contraindications: Vec<String>,
-    /// Whether we've asked about current medications/supplements
-    pub asked_about_medications: bool,
+    /// Safety checklist — tracks required clinical touchpoints.
+    pub checklist: IntakeChecklist,
     /// Intake KG: question template IDs already asked this session.
     pub visited_questions: HashSet<String>,
     /// Intake KG: how many times each goal has been probed.
@@ -186,7 +238,7 @@ impl IntakeSession {
             turns: Vec::new(),
             turn_summary: None,
             contraindications: Vec::new(),
-            asked_about_medications: false,
+            checklist: IntakeChecklist::default(),
             visited_questions: HashSet::new(),
             goal_ask_counts: HashMap::new(),
             active_profiles: Vec::new(),

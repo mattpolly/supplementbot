@@ -205,11 +205,11 @@ pub fn build_context(
     }
 
     // --- Medication check reminder ---
-    if !session.asked_about_medications && !session.candidates.is_empty() {
+    if !session.checklist.complete() && !session.candidates.is_empty() {
         prompt.push_str(
-            "IMPORTANT — YOU HAVE NOT YET ASKED ABOUT MEDICATIONS:\n\
-             Before making any recommendations, you MUST ask whether the user\n\
-             is currently taking any prescription medications or other supplements.\n\
+            "IMPORTANT — SAFETY CHECKLIST NOT YET COMPLETE:\n\
+             Before making any recommendations, you MUST complete all required safety questions\n\
+             (prescriptions, OTC medications/supplements, health conditions, contraindication check).\n\
              This is safety-critical for identifying potential interactions.\n\n",
         );
     }

@@ -46,7 +46,7 @@ pub fn evaluate_transition(
 
     // Safety gate: before entering Recommendation, we MUST have asked about
     // current medications and supplements. Interactions are safety-critical.
-    if candidate_phase == IntakePhase::Recommendation && !session.asked_about_medications {
+    if candidate_phase == IntakePhase::Recommendation && !session.checklist.complete() {
         return session.phase.clone();
     }
 
@@ -273,7 +273,10 @@ mod tests {
         use graph_service::source::EdgeQuality;
         let mut session = empty_session();
         session.add_complaint("headache");
-        session.asked_about_medications = true; // medication gate satisfied
+        session.checklist.prescriptions_asked = true;
+        session.checklist.otc_and_supplements_asked = true;
+        session.checklist.health_conditions_asked = true;
+        session.checklist.contraindications_checked = true;
         session.candidates = CandidateSet {
             candidates: vec![Candidate {
                 ingredient: "magnesium".to_string(),
@@ -305,7 +308,7 @@ mod tests {
                 contraindications: vec![],
             }],
         };
-        // Without asked_about_medications = true, should stay in current phase
+        // Without checklist complete, should stay in current phase
         let next = evaluate_transition(&session, &[], 0, &UserSignal::WantsRecommendations);
         assert_eq!(next, IntakePhase::Differentiation);
     }
@@ -376,7 +379,10 @@ mod tests {
     fn test_differentiation_to_recommendation_when_exhausted() {
         let mut session = empty_session();
         session.phase = IntakePhase::Differentiation;
-        session.asked_about_medications = true; // medication gate satisfied
+        session.checklist.prescriptions_asked = true;
+        session.checklist.otc_and_supplements_asked = true;
+        session.checklist.health_conditions_asked = true;
+        session.checklist.contraindications_checked = true;
 
         let next = evaluate_transition(&session, &[], 0, &UserSignal::Normal);
         assert_eq!(next, IntakePhase::Recommendation);
