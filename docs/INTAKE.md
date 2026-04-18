@@ -179,6 +179,7 @@ Tracks a single conversation. Key fields:
 - `disclosed_supplements: Vec<String>` — for adverse reaction checking
 - `last_differentiator_count: usize` — from previous turn's executor (engine needs it for transitions)
 - `differentiation_turns: usize` — capped at 3; Differentiation exits after 3 turns even if discriminators remain
+- `checklist: IntakeChecklist` — four required safety touchpoints (see below)
 
 ### Phase Transitions
 
@@ -188,7 +189,12 @@ The engine evaluates exit conditions per stage:
 - **SystemReview → Differentiation/Recommendation**: when all cluster-prioritized systems reviewed
 - **Differentiation → CausationInquiry**: after 3 `differentiation_turns` OR when disclosed medications have interactions to discuss
 - **CausationInquiry → Recommendation**: always (single-turn acknowledgment)
-- **Medication chokepoint**: `next_turn()` intercepts any transition to Recommendation — if `medications_asked` is false, redirects to HPI instead. Single enforcement point regardless of which path triggered the transition.
+- **Safety checklist chokepoint**: `next_turn()` intercepts any transition to Recommendation — if `checklist.complete()` is false, redirects to HPI. Single enforcement point regardless of which path triggered the transition. The checklist requires four items in partial order:
+  1. `prescriptions_asked` — bot asked `ask_prescriptions`
+  2. `otc_and_supplements_asked` — bot asked `ask_otc_supplements`
+  3. `health_conditions_asked` — bot asked `ask_health_conditions`
+  4. `contraindications_checked` — set automatically once 1–3 are true; no question needed
+  Items 1–3 are forced by the engine (score 10.0) once ≥2 OLDCARTS dimensions are filled. Each flag is set **only** when the engine delivers the template — never from user-volunteered information (liability requirement).
 
 ### Safety (Three Layers)
 
@@ -253,10 +259,13 @@ Patient: "My legs hurt at night and I can't sleep."
 1. `GraphAction:FindDiscriminators` finds non-shared nodes between top candidates
 2. Entropy-sorted: prefer questions that split candidates closest to 50/50
 
-**Turn 9 — Medication Check (safety gate)**
-1. `ClinicalGoal:medication_check` is `safety_gate: true` — cannot skip
-2. "Are you currently taking any prescription medications or other supplements?"
-3. Patient: "I take magnesium glycinate and an SSRI"
+**Turns 9a–9c — Safety Checklist (required before recommendation)**
+1. Engine forces `ask_prescriptions`: "Are you currently taking any prescription medications?"
+2. Engine forces `ask_otc_supplements`: "Are you taking any OTC medications or supplements right now?"
+3. Engine forces `ask_health_conditions`: "Do you have any health conditions I should know about — pregnancy, kidney or liver disease, heart problems?"
+4. `contraindications_checked` flips automatically — iDISK interaction check already ran in executor
+- All three questions are forced at score 10.0 (highest priority) once ≥2 OLDCARTS dimensions filled
+- Patient example: "I take an SSRI" / "just vitamin D" / "no conditions"
 
 **Turn 9b — Causation Inquiry (if applicable)**
 1. `GraphAction:CheckInteractions` → SSRI found in iDISK interaction edges

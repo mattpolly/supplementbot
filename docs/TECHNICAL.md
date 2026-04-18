@@ -556,7 +556,7 @@ Clinical reasoning engine for the conversational supplement intake interview.
 Six phases: ChiefComplaint → Hpi → ReviewOfSystems → Differentiation → CausationInquiry → Recommendation
 
 Key gates:
-- **Medication chokepoint**: single gate in `next_turn()` — any transition to Recommendation is intercepted and redirected to HPI if `medications_asked` is false. This is enforced regardless of which path triggered the transition.
+- **Safety checklist chokepoint**: single gate in `next_turn()` — any transition to Recommendation is intercepted and redirected to HPI if `checklist.complete()` is false. `IntakeChecklist` on `IntakeSession` tracks four required touchpoints in partial order: `prescriptions_asked` → `otc_and_supplements_asked` → `health_conditions_asked` → `contraindications_checked` (auto). Each flag is set only when the engine delivers the specific question template — never from user-volunteered input.
 - Auto-recommend when candidate confidence ≥0.15 ahead of others OR after 3 Differentiation turns
 - `DoneSharing` signal detection for early phase transitions
 
