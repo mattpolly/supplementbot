@@ -134,9 +134,9 @@ pub async fn process_turn(
             // Apply OLDCARTS + denied systems
             apply_extraction(session, &extraction);
 
-            // Apply medications — mark as asked and record
+            // Record disclosed medications (asked_about_medications is set
+            // only when the engine delivers the ask_medications question)
             if !extraction.medications.is_empty() {
-                session.asked_about_medications = true;
                 for med in &extraction.medications {
                     let lower = med.to_lowercase();
                     if !session.contraindications.contains(&lower) {
@@ -352,6 +352,11 @@ pub async fn process_turn(
                     .goal_ask_counts
                     .entry(q.goal_id.clone())
                     .or_insert(0) += 1;
+                // Authoritative medication gate: only mark asked when the engine
+                // actually selected and delivered the medications question.
+                if q.template_id == "ask_medications" {
+                    session.asked_about_medications = true;
+                }
             }
 
             // Apply stage transition from engine
@@ -415,20 +420,10 @@ pub async fn process_turn(
 
     let complete = new_phase == IntakePhase::Recommendation;
 
-    // Detect if the agent just asked about medications
-    let response_lower = safe_response.to_lowercase();
-    let agent_asked_about_meds = response_lower.contains("medication")
-        || response_lower.contains("prescription")
-        || response_lower.contains("supplements you")
-        || response_lower.contains("currently taking");
-
     let candidate_count = s
         .sessions
         .with_session(session_id, |session| {
             session.add_agent_turn(&safe_response);
-            if agent_asked_about_meds {
-                session.asked_about_medications = true;
-            }
             session.candidates.len()
         })
         .await
