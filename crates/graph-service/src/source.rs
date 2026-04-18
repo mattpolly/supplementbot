@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::engine::local::Db;
+use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
@@ -174,12 +174,12 @@ pub struct ProviderObservation {
 /// The source tables are materialized views of event log data.
 /// The JSONL event log is the portable source of truth.
 pub struct SourceStore {
-    db: Surreal<Db>,
+    db: Surreal<Any>,
 }
 
 impl SourceStore {
     /// Create a source store using the same DB handle as the KnowledgeGraph.
-    pub fn new(db: &Surreal<Db>) -> Self {
+    pub fn new(db: &Surreal<Any>) -> Self {
         Self { db: db.clone() }
     }
 

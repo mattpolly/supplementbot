@@ -57,10 +57,6 @@ struct Cli {
     #[arg(long, default_value = "3")]
     max_speculative: usize,
 
-    /// Path to the graph database directory (default: ~/.supplementbot/graph)
-    #[arg(short, long)]
-    graph_db: Option<String>,
-
     /// Export the graph as JSON + HTML for visualization and exit
     #[arg(long, value_name = "PATH")]
     export: Option<String>,
@@ -101,10 +97,14 @@ enum Commands {
         /// Minimum edge confidence (0.0-1.0)
         #[arg(short, long)]
         confidence: Option<f64>,
+    },
 
-        /// Path to the graph database directory (default: ~/.supplementbot/graph)
-        #[arg(short, long)]
-        graph_db: Option<String>,
+    /// Migrate data from an embedded RocksDB graph to the SurrealDB server.
+    /// Destination is configured via DB_URL / DB_USER / DB_PASS env vars.
+    Migrate {
+        /// Path to the existing embedded RocksDB graph directory
+        #[arg(long)]
+        from: String,
     },
 }
 
@@ -129,12 +129,14 @@ enum QueryType {
     List,
 }
 
-fn default_db_path() -> String {
-    if let Ok(p) = std::env::var("GRAPH_PATH") {
-        return p;
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    format!("{}/.supplementbot/graph", home)
+fn db_connection() -> (String, String, String) {
+    let url = std::env::var("DB_URL").unwrap_or_else(|_| "ws://localhost:8000".to_string());
+    let user = std::env::var("DB_USER").unwrap_or_else(|_| "root".to_string());
+    let pass = std::env::var("DB_PASS").unwrap_or_else(|_| {
+        eprintln!("Warning: DB_PASS not set, using empty password");
+        String::new()
+    });
+    (url, user, pass)
 }
 
 fn build_provider(cli: &Cli) -> Result<Box<dyn LlmProvider>, String> {
@@ -277,14 +279,124 @@ fn parse_quality(s: &str) -> Option<EdgeQuality> {
     }
 }
 
+async fn run_migrate(from: &str) {
+    println!("─── Migrate ────────────────────────────────────────────");
+    println!("  Source (embedded): {}", from);
+
+    let src = match KnowledgeGraph::open_embedded(from).await {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("Error opening embedded graph: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let src_nodes = src.node_count().await;
+    let src_edges = src.edge_count().await;
+    println!("  Found: {} nodes, {} edges", src_nodes, src_edges);
+
+    if src_nodes == 0 {
+        eprintln!("Source graph is empty — nothing to migrate.");
+        std::process::exit(1);
+    }
+
+    let (db_url, db_user, db_pass) = db_connection();
+    println!("  Destination (server): {}", db_url);
+
+    let dst = match KnowledgeGraph::open(&db_url, &db_user, &db_pass).await {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("Error connecting to destination server: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let dst_nodes_before = dst.node_count().await;
+    if dst_nodes_before > 0 {
+        eprintln!(
+            "Warning: destination already has {} nodes. Proceeding will add to existing data.",
+            dst_nodes_before
+        );
+    }
+
+    // --- Nodes ---
+    let src_node_list = src.all_nodes().await;
+    let mut nodes_inserted = 0usize;
+    for idx in &src_node_list {
+        if let Some(data) = src.node_data(idx).await {
+            dst.add_node(data).await;
+            nodes_inserted += 1;
+        }
+    }
+    println!("  node: {} / {} inserted", nodes_inserted, src_node_list.len());
+
+    // --- Edges (use typed API to avoid RecordId serialization issues) ---
+    let src_edges_list = src.all_edges().await;
+    let edge_count = src_edges_list.len();
+    let mut edges_inserted = 0usize;
+    for (src_idx, tgt_idx, edge_data) in src_edges_list {
+        // Resolve node names from source, find them in destination
+        if let (Some(src_data), Some(tgt_data)) = (
+            src.node_data(&src_idx).await,
+            src.node_data(&tgt_idx).await,
+        ) {
+            if let (Some(dst_src), Some(dst_tgt)) = (
+                dst.find_node(&src_data.name).await,
+                dst.find_node(&tgt_data.name).await,
+            ) {
+                dst.add_edge(&dst_src, &dst_tgt, edge_data).await;
+                edges_inserted += 1;
+            }
+        }
+    }
+    println!("  edge: {} / {} inserted", edges_inserted, edge_count);
+
+    // --- Flat tables (source/merge) via raw JSON ---
+    let flat_tables = ["node_source", "edge_source", "node_alias", "node_cui"];
+    for table in &flat_tables {
+        let records: Vec<serde_json::Value> = src
+            .db()
+            .query(format!("SELECT * FROM {table}"))
+            .await
+            .and_then(|mut r| r.take(0))
+            .unwrap_or_default();
+
+        let count = records.len();
+        if count == 0 {
+            println!("  {}: empty, skipping", table);
+            continue;
+        }
+
+        let mut inserted = 0usize;
+        for record in &records {
+            let ok = dst
+                .db()
+                .create::<Option<serde_json::Value>>(*table)
+                .content(record.clone())
+                .await
+                .is_ok();
+            if ok {
+                inserted += 1;
+            }
+        }
+        println!("  {}: {} / {} inserted", table, inserted, count);
+    }
+
+    let dst_nodes = dst.node_count().await;
+    let dst_edges = dst.edge_count().await;
+    println!();
+    println!("  Done: {} nodes, {} edges in destination", dst_nodes, dst_edges);
+    println!("  Verify with: supplementbot query list");
+}
+
 async fn run_query(
     query_type: QueryType,
     lens_str: String,
     quality_str: Option<String>,
     min_confidence: Option<f64>,
-    db_path: String,
 ) {
-    let graph = match KnowledgeGraph::open(&db_path).await {
+    let (db_url, db_user, db_pass) = db_connection();
+    let graph = match KnowledgeGraph::open(&db_url, &db_user, &db_pass).await {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error opening graph database: {}", e);
@@ -442,23 +554,22 @@ async fn main() {
     load_env();
     let cli = Cli::parse();
 
-    // Handle query subcommand
-    if let Some(Commands::Query {
-        query_type,
-        lens,
-        quality,
-        confidence,
-        graph_db,
-    }) = cli.command
-    {
-        let db_path = graph_db.unwrap_or_else(default_db_path);
-        run_query(query_type, lens, quality, confidence, db_path).await;
-        return;
+    // Handle subcommands
+    match cli.command {
+        Some(Commands::Query { query_type, lens, quality, confidence }) => {
+            run_query(query_type, lens, quality, confidence).await;
+            return;
+        }
+        Some(Commands::Migrate { from }) => {
+            run_migrate(&from).await;
+            return;
+        }
+        None => {}
     }
 
     let nutraceuticals: Vec<String> = cli.nutraceutical.iter().map(|s| s.trim().to_string()).collect();
 
-    let db_path = cli.graph_db.clone().unwrap_or_else(default_db_path);
+    let (db_path, db_user, db_pass) = db_connection();
 
     let ingestion_lens = parse_lens(&cli.lens);
 
@@ -470,7 +581,7 @@ async fn main() {
     println!("  Provider:       {}", cli.provider);
     println!("  Lens:           {} ({})", cli.lens, ingestion_lens.level());
     println!("  Event log:      {}", cli.output);
-    println!("  Graph DB:       {}", db_path);
+    println!("  Graph DB:       {}", db_path);  // db_path is now the URL
     println!("  Max iterations: {}", cli.max_iterations);
     println!("  Max gaps/iter:  {}", cli.max_gaps);
     println!();
@@ -494,8 +605,8 @@ async fn main() {
         }
     };
 
-    // Open persistent graph database
-    let graph = match KnowledgeGraph::open(&db_path).await {
+    // Connect to SurrealDB server
+    let graph = match KnowledgeGraph::open(&db_path, &db_user, &db_pass).await {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error opening graph database: {}", e);

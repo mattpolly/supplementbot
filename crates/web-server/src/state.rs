@@ -45,9 +45,6 @@ pub struct AppStateInner {
     /// SuppKG — in-memory citation index (PubMed PMIDs + sentences).
     /// None if SUPPKG_PATH is not set or file not found.
     pub suppkg: Option<Arc<SuppKg>>,
-    /// Alphabetically sorted list of ingredient names the graph knows about.
-    /// Cached at startup — ingredients are added offline, not at runtime.
-    pub known_ingredients: Vec<String>,
     /// Coverage strength per symptom archetype, sorted Strong → Moderate → Weak.
     /// Cached at startup for use in the opening greeting.
     pub archetype_coverage: Vec<ArchetypeCoverage>,
@@ -55,7 +52,9 @@ pub struct AppStateInner {
 
 impl AppState {
     pub async fn init(
-        graph_path: &str,
+        db_url: &str,
+        db_user: &str,
+        db_pass: &str,
         idisk_data_dir: Option<&str>,
         suppkg_path: Option<&str>,
         max_concurrent: usize,
@@ -63,10 +62,10 @@ impl AppState {
         monthly_cap: usize,
         session_timeout_secs: u64,
     ) -> Self {
-        // Open persistent graph
-        let graph = KnowledgeGraph::open(graph_path)
+        // Connect to SurrealDB server
+        let graph = KnowledgeGraph::open(db_url, db_user, db_pass)
             .await
-            .expect("failed to open knowledge graph");
+            .expect("failed to connect to knowledge graph database");
 
         let source = SourceStore::new(graph.db());
         let merge = MergeStore::new(graph.db());
@@ -135,7 +134,6 @@ impl AppState {
 
         let node_count = graph.node_count().await;
         let edge_count = graph.edge_count().await;
-        let known_ingredients = graph.known_ingredients().await;
 
         // Compute per-archetype coverage at startup (query-only, no DB writes)
         let query_engine = QueryEngine::new(&graph, &source, &merge).await;
@@ -144,10 +142,7 @@ impl AppState {
         let strong_count = archetype_coverage.iter().filter(|c| c.strength == graph_service::query::CoverageStrength::Strong).count();
         let moderate_count = archetype_coverage.iter().filter(|c| c.strength == graph_service::query::CoverageStrength::Moderate).count();
 
-        eprintln!(
-            "  graph loaded: {} nodes, {} edges, {} ingredients",
-            node_count, edge_count, known_ingredients.len()
-        );
+        eprintln!("  graph loaded: {} nodes, {} edges", node_count, edge_count);
         eprintln!(
             "  coverage: {}/{} archetypes strong, {}/{} moderate",
             strong_count, archetype_coverage.len(),
@@ -176,7 +171,6 @@ impl AppState {
                 intake_store,
                 idisk,
                 suppkg,
-                known_ingredients,
                 archetype_coverage,
             }),
         }

@@ -1,4 +1,5 @@
-use surrealdb::engine::local::{Db, Mem, RocksDb};
+use surrealdb::engine::any::Any;
+use surrealdb::opt::auth::Root;
 use surrealdb::Surreal;
 use surrealdb_types::{RecordId, SurrealValue};
 
@@ -64,16 +65,15 @@ struct EdgeRecordWithId {
 // ---------------------------------------------------------------------------
 
 pub struct KnowledgeGraph {
-    db: Surreal<Db>,
+    db: Surreal<Any>,
 }
 
 impl KnowledgeGraph {
-    /// Open or create a persistent graph database at the given path.
-    pub async fn open(path: &str) -> Result<Self, surrealdb::Error> {
-        let db = Surreal::new::<RocksDb>(path).await?;
+    /// Connect to a running SurrealDB server.
+    pub async fn open(url: &str, user: &str, pass: &str) -> Result<Self, surrealdb::Error> {
+        let db = surrealdb::engine::any::connect(url).await?;
+        db.signin(Root { username: user.to_string(), password: pass.to_string() }).await?;
         db.use_ns("supplementbot").use_db("graph").await?;
-        // Ensure the edge table is typed as a relation so that `in`/`out`
-        // are hydrated during full table scans (SurrealDB 3.0 requirement).
         let _: surrealdb::Result<Vec<serde_json::Value>> = db
             .query("DEFINE TABLE edge TYPE RELATION IN node OUT node")
             .await
@@ -81,16 +81,23 @@ impl KnowledgeGraph {
         Ok(Self { db })
     }
 
+    /// Open an existing embedded RocksDB graph (used by the migrate command only).
+    pub async fn open_embedded(path: &str) -> Result<Self, surrealdb::Error> {
+        let db = surrealdb::engine::any::connect(format!("rocksdb:{path}")).await?;
+        db.use_ns("supplementbot").use_db("graph").await?;
+        Ok(Self { db })
+    }
+
     /// Create an in-memory graph (for tests).
     pub async fn in_memory() -> Result<Self, surrealdb::Error> {
-        let db = Surreal::new::<Mem>(()).await?;
+        let db = surrealdb::engine::any::connect("memory").await?;
         db.use_ns("supplementbot").use_db("graph").await?;
         Ok(Self { db })
     }
 
     /// Get a reference to the underlying SurrealDB handle.
-    /// Used by the evidence layer to share the same database connection.
-    pub fn db(&self) -> &Surreal<Db> {
+    /// Used by the source, merge, and intake stores to share the connection.
+    pub fn db(&self) -> &Surreal<Any> {
         &self.db
     }
 

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use surrealdb::engine::local::Db;
+use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
 use surrealdb_types::SurrealValue;
 
@@ -99,12 +99,12 @@ impl From<CuiRecordWithId> for CuiRecord {
 /// Manages synonym resolution via alias and CUI tables. Shares a SurrealDB
 /// connection with the KnowledgeGraph and SourceStore.
 pub struct MergeStore {
-    db: Surreal<Db>,
+    db: Surreal<Any>,
 }
 
 impl MergeStore {
     /// Create a merge store using the same DB handle as the KnowledgeGraph.
-    pub fn new(db: &Surreal<Db>) -> Self {
+    pub fn new(db: &Surreal<Any>) -> Self {
         Self { db: db.clone() }
     }
 

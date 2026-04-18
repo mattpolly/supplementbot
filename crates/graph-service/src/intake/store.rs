@@ -5,7 +5,7 @@
 // prefixed tables for namespace separation.
 // ---------------------------------------------------------------------------
 
-use surrealdb::engine::local::Db;
+use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
 use surrealdb_types::{RecordId, SurrealValue};
 
@@ -184,13 +184,13 @@ struct ExitConditionRecordWithId {
 // ---------------------------------------------------------------------------
 
 pub struct IntakeGraphStore {
-    db: Surreal<Db>,
+    db: Surreal<Any>,
 }
 
 impl IntakeGraphStore {
     /// Create a store using an existing SurrealDB connection.
     /// The connection should already be pointed at the right namespace/db.
-    pub fn new(db: &Surreal<Db>) -> Self {
+    pub fn new(db: &Surreal<Any>) -> Self {
         Self { db: db.clone() }
     }
 

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use surrealdb::engine::local::Db;
+use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
 use surrealdb_types::{RecordId, SurrealValue};
 
@@ -120,7 +120,7 @@ struct IdiskEffectivenessRecordWithId {
 // ---------------------------------------------------------------------------
 
 pub struct IdiskImporter {
-    db: Surreal<Db>,
+    db: Surreal<Any>,
 }
 
 /// Import stats returned after loading.
@@ -135,7 +135,7 @@ pub struct ImportStats {
 }
 
 impl IdiskImporter {
-    pub fn new(db: &Surreal<Db>) -> Self {
+    pub fn new(db: &Surreal<Any>) -> Self {
         Self { db: db.clone() }
     }
 

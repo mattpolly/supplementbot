@@ -30,8 +30,9 @@ async fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
-    let graph_path = std::env::var("GRAPH_PATH")
-        .unwrap_or_else(|_| dirs_home().join(".supplementbot/graph").to_string_lossy().into());
+    let db_url = std::env::var("DB_URL").unwrap_or_else(|_| "ws://localhost:8000".to_string());
+    let db_user = std::env::var("DB_USER").unwrap_or_else(|_| "root".to_string());
+    let db_pass = std::env::var("DB_PASS").expect("DB_PASS must be set");
     let static_dir = std::env::var("STATIC_DIR")
         .unwrap_or_else(|_| "/home/mpolly/supplementbot.com".to_string());
     let max_concurrent: usize = std::env::var("MAX_CONCURRENT_SESSIONS")
@@ -54,7 +55,7 @@ async fn main() {
     let suppkg_path = std::env::var("SUPPKG_PATH").ok();
 
     eprintln!("supplementbot-web starting...");
-    eprintln!("  graph: {graph_path}");
+    eprintln!("  db: {db_url}");
     eprintln!("  static: {static_dir}");
     if let Some(ref dir) = idisk_data_dir {
         eprintln!("  iDISK: {dir}");
@@ -67,7 +68,9 @@ async fn main() {
 
     // -- Initialize shared state --
     let state = AppState::init(
-        &graph_path,
+        &db_url,
+        &db_user,
+        &db_pass,
         idisk_data_dir.as_deref(),
         suppkg_path.as_deref(),
         max_concurrent,

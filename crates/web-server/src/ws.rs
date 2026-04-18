@@ -209,7 +209,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
 
                 // Intercept "what supplements do you know about?" before the intake handler.
                 if is_asking_about_known_supplements(&client_msg.text) {
-                    let ingredients = &state.inner.known_ingredients;
+                    let ingredients = state.inner.graph.known_ingredients().await;
                     let reply = if ingredients.is_empty() {
                         "I haven't been trained on any specific supplements yet — my knowledge graph is still being built.".to_string()
                     } else {
