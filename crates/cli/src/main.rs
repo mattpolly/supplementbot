@@ -130,6 +130,9 @@ enum QueryType {
 }
 
 fn default_db_path() -> String {
+    if let Ok(p) = std::env::var("GRAPH_PATH") {
+        return p;
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     format!("{}/.supplementbot/graph", home)
 }
