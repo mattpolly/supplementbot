@@ -200,6 +200,54 @@ cargo run --bin supplementbot -- -n Zinc -p anthropic         # adds to same gra
 # Web server sees both immediately; no restart needed
 ```
 
+### Database Sync (bodhi ↔ local)
+
+The production server (`newark` / bodhi) and local dev machine (`beehive`) each run their own SurrealDB instance. Use `surreal export`/`import` over HTTP (not WebSocket — WS backup is unsupported in v3+).
+
+**Pull from bodhi → local (refresh local test data):**
+
+```bash
+# 1. Export from bodhi
+ssh newark "surreal export \
+  --endpoint http://localhost:8000 \
+  --username root --password supplement123 \
+  --namespace supplementbot --database supplementbot \
+  /tmp/graph-export.surql"
+
+# 2. Copy to local
+scp newark:/tmp/graph-export.surql /srv/www/supplementbot/data/graph-export.surql
+
+# 3. Import locally (stops and restarts to avoid conflicts)
+surreal import \
+  --endpoint http://localhost:8000 \
+  --username root --password root \
+  --namespace supplementbot --database supplementbot \
+  /srv/www/supplementbot/data/graph-export.surql
+```
+
+**Push local → bodhi (promote local training data to production):**
+
+```bash
+# 1. Export from local
+surreal export \
+  --endpoint http://localhost:8000 \
+  --username root --password root \
+  --namespace supplementbot --database supplementbot \
+  /srv/www/supplementbot/data/graph-export.surql
+
+# 2. Copy to bodhi
+scp /srv/www/supplementbot/data/graph-export.surql newark:/tmp/graph-export.surql
+
+# 3. Import on bodhi
+ssh newark "surreal import \
+  --endpoint http://localhost:8000 \
+  --username root --password supplement123 \
+  --namespace supplementbot --database supplementbot \
+  /tmp/graph-export.surql"
+```
+
+Credentials: bodhi uses `supplement123`, local uses `root`. SSH via `newark` (resolves to bodhi). No restart of `supplementbot-web` is needed after import — it reconnects automatically.
+
 ### Data Migration
 
 If moving from an older embedded RocksDB graph to server mode, use the migrate subcommand:
