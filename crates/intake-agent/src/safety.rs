@@ -69,7 +69,7 @@ pub fn check_red_flags(input: &str) -> SafetyCheck {
 /// Order matters: more severe patterns first.
 static BLACKLIST_PATTERNS: &[&str] = &[
     // Diagnosis language
-    r"(?i)\byou have\b",
+    r"(?i)\byou have\s+(?:a |an )?(?:deficiency|condition|disorder|disease|infection|syndrome|illness)\b",
     r"(?i)\byou(?:'re| are) (?:suffering from|diagnosed with)\b",
     r"(?i)\bI (?:can |would )?diagnos[ei]",
     r"(?i)\bdiagnosis\b",

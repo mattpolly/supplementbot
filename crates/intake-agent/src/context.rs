@@ -51,7 +51,7 @@ pub fn build_context(
     // --- Legal constraints ---
     prompt.push_str(
         "LEGAL CONSTRAINTS:\n\
-         - Never diagnose. Never say \"you have X.\"\n\
+         - Never diagnose. Never say \"you have [condition/disease/disorder].\"\n\
          - Never say \"cure.\" Supplements address symptoms, not diseases.\n\
          - Never give instructions like \"take X\" or \"you should try X.\"\n\
            Instead, report what the research suggests: \"For symptoms like\n\
@@ -276,7 +276,7 @@ pub fn build_context_v2(
     // --- Legal constraints (unchanged) ---
     prompt.push_str(
         "LEGAL CONSTRAINTS:\n\
-         - Never diagnose. Never say \"you have X.\"\n\
+         - Never diagnose. Never say \"you have [condition/disease/disorder].\"\n\
          - Never say \"cure.\" Supplements address symptoms, not diseases.\n\
          - Never give instructions like \"take X\" or \"you should try X.\"\n\
            Instead, report what the research suggests: \"For symptoms like\n\
