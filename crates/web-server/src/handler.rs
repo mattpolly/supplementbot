@@ -162,12 +162,28 @@ pub async fn process_turn(
         .await?;
 
     // Step 3b: Generate a one-sentence summary of what the user communicated this turn.
+    // Include the last agent message for context so short replies like "3 to 4" are interpretable.
+    let last_agent_turn = s
+        .sessions
+        .with_session(session_id, |session| {
+            session.turns.iter().rev()
+                .find(|t| t.role == intake_agent::session::TurnRole::Agent)
+                .map(|t| t.text.clone())
+        })
+        .await
+        .flatten();
+
     let turn_summary = {
+        let context = if let Some(ref agent_msg) = last_agent_turn {
+            format!("Previous bot message: {}\nUser reply: {}", agent_msg, user_message)
+        } else {
+            format!("User message: {}", user_message)
+        };
         let prompt = format!(
-            "In one sentence, what is the most important thing the user communicated in this message? \
-             Focus on their intent or emotional state, not just the literal content. \
-             Reply with only the sentence, no preamble.\n\nUser message: {}",
-            user_message
+            "In one sentence, what is the most important thing the user communicated? \
+             Focus on their intent or what information they provided, not just the literal content. \
+             Reply with only the sentence, no preamble.\n\n{}",
+            context
         );
         let req = CompletionRequest::new(&prompt).with_max_tokens(60).with_temperature(0.3);
         match s.extractor.complete(req).await {
