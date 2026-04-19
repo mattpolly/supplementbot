@@ -78,7 +78,7 @@ static BLACKLIST_PATTERNS: &[&str] = &[
     r"(?i)\btreat(?:s|ing|ment of)?\s+(?:your |the )?\b(?:disease|condition|disorder|illness)\b",
     // Dosage prescriptions (we don't do dosage)
     r"(?i)\btake\s+\d+\s*(?:mg|g|ml|mcg|iu)\b",
-    r"(?i)\bprescri(?:be|ption)\b",
+    r"(?i)\bI (?:can |will |would )?prescribe\b",
 ];
 
 /// Result of the post-generation filter.
