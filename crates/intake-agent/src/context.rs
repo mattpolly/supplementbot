@@ -174,32 +174,11 @@ pub fn build_context(
         prompt.push('\n');
     }
 
-    // --- Conversation summary (compressed history) ---
-    if let Some(ref summary) = session.turn_summary {
-        prompt.push_str("CONVERSATION SUMMARY (earlier turns):\n");
-        prompt.push_str(summary);
-        prompt.push_str("\n\n");
-    }
-
-    // --- Recent conversation turns (so the LLM doesn't repeat itself) ---
-    let recent_turns: Vec<_> = session
-        .turns
-        .iter()
-        .rev()
-        .take(8) // last 4 exchanges
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    if !recent_turns.is_empty() {
-        prompt.push_str("RECENT TURNS (do NOT repeat questions from here):\n");
-        for turn in &recent_turns {
-            let role = match turn.role {
-                TurnRole::User => "User",
-                TurnRole::Agent => "You",
-            };
-            prompt.push_str(&format!("  {}: {}\n", role, turn.text));
+    // --- Per-turn summaries (entire session, one sentence per user turn) ---
+    if !session.turn_summaries.is_empty() {
+        prompt.push_str("TURN SUMMARIES (what the user communicated each turn):\n");
+        for (i, summary) in session.turn_summaries.iter().enumerate() {
+            prompt.push_str(&format!("  Turn {}: {}\n", i + 1, summary));
         }
         prompt.push('\n');
     }
@@ -402,32 +381,11 @@ pub fn build_context_v2(
         prompt.push('\n');
     }
 
-    // --- Conversation summary ---
-    if let Some(ref summary) = session.turn_summary {
-        prompt.push_str("CONVERSATION SUMMARY (earlier turns):\n");
-        prompt.push_str(summary);
-        prompt.push_str("\n\n");
-    }
-
-    // --- Recent turns ---
-    let recent_turns: Vec<_> = session
-        .turns
-        .iter()
-        .rev()
-        .take(8)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    if !recent_turns.is_empty() {
-        prompt.push_str("RECENT TURNS (do NOT repeat questions from here):\n");
-        for turn in &recent_turns {
-            let role = match turn.role {
-                TurnRole::User => "User",
-                TurnRole::Agent => "You",
-            };
-            prompt.push_str(&format!("  {}: {}\n", role, turn.text));
+    // --- Per-turn summaries (entire session, one sentence per user turn) ---
+    if !session.turn_summaries.is_empty() {
+        prompt.push_str("TURN SUMMARIES (what the user communicated each turn):\n");
+        for (i, summary) in session.turn_summaries.iter().enumerate() {
+            prompt.push_str(&format!("  Turn {}: {}\n", i + 1, summary));
         }
         prompt.push('\n');
     }

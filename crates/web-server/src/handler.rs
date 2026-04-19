@@ -161,6 +161,26 @@ pub async fn process_turn(
         })
         .await?;
 
+    // Step 3b: Generate a one-sentence summary of what the user communicated this turn.
+    let turn_summary = {
+        let prompt = format!(
+            "In one sentence, what is the most important thing the user communicated in this message? \
+             Focus on their intent or emotional state, not just the literal content. \
+             Reply with only the sentence, no preamble.\n\nUser message: {}",
+            user_message
+        );
+        let req = CompletionRequest::new(&prompt).with_max_tokens(60).with_temperature(0.3);
+        match s.extractor.complete(req).await {
+            Ok(resp) => resp.content.trim().to_string(),
+            Err(_) => user_message.chars().take(80).collect(),
+        }
+    };
+    s.sessions
+        .with_session(session_id, |session| {
+            session.add_turn_summary(turn_summary);
+        })
+        .await;
+
     // Step 4: Map concepts to graph nodes (for body systems, mechanisms, etc.)
     for symptom in &extraction.symptoms {
         let mapped = concept_map::map_text_to_nodes(symptom, &s.graph, &s.merge).await;

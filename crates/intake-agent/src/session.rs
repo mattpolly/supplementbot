@@ -204,8 +204,8 @@ pub struct IntakeSession {
     pub lens_level: f64,
     /// Full conversation history
     pub turns: Vec<Turn>,
-    /// Compressed history after ~8 turns
-    pub turn_summary: Option<String>,
+    /// Per-turn summaries — one sentence per user turn, entire session
+    pub turn_summaries: Vec<String>,
     /// Disclosed conditions/medications (for contraindication filtering)
     pub contraindications: Vec<String>,
     /// Safety checklist — tracks required clinical touchpoints.
@@ -236,7 +236,7 @@ impl IntakeSession {
             candidates: CandidateSet::new(),
             lens_level: 0.15, // start at 5th-grade level
             turns: Vec::new(),
-            turn_summary: None,
+            turn_summaries: Vec::new(),
             contraindications: Vec::new(),
             checklist: IntakeChecklist::default(),
             visited_questions: HashSet::new(),
@@ -269,9 +269,9 @@ impl IntakeSession {
         self.turns.len()
     }
 
-    /// Whether the conversation history should be compressed.
-    pub fn needs_compression(&self) -> bool {
-        self.turn_summary.is_none() && self.turns.len() > 16
+    /// Append a one-sentence summary for the latest user turn.
+    pub fn add_turn_summary(&mut self, summary: String) {
+        self.turn_summaries.push(summary);
     }
 
     /// Add a chief complaint from raw user text.
