@@ -59,6 +59,8 @@ pub struct TurnResult {
     pub candidate_count: usize,
     /// PubMed citations supporting the recommendation (populated at recommendation phase)
     pub citations: Vec<CitationRef>,
+    /// LLM system prompt for this turn (only populated when DEBUG_LLM_PROMPT=true)
+    pub debug_llm_prompt: Option<String>,
 }
 
 /// Process one user message through the full pipeline.
@@ -85,6 +87,7 @@ pub async fn process_turn(
             complete: true,
             candidate_count: 0,
             citations: vec![],
+            debug_llm_prompt: None,
         });
     }
 
@@ -396,7 +399,7 @@ pub async fn process_turn(
         .await?;
 
     let llm_request = CompletionRequest::new(&intake_context.user_message)
-        .with_system(intake_context.system_prompt)
+        .with_system(intake_context.system_prompt.clone())
         .with_max_tokens(if new_phase == IntakePhase::Recommendation {
             1024
         } else {
@@ -460,6 +463,12 @@ pub async fn process_turn(
         vec![]
     };
 
+    let debug_llm_prompt = if state.inner.debug_llm_prompt {
+        Some(intake_context.system_prompt.clone())
+    } else {
+        None
+    };
+
     Some(TurnResult {
         response: safe_response,
         phase: phase_str.to_string(),
@@ -467,6 +476,7 @@ pub async fn process_turn(
         complete,
         candidate_count,
         citations,
+        debug_llm_prompt,
     })
 }
 

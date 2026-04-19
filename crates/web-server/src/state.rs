@@ -48,6 +48,8 @@ pub struct AppStateInner {
     /// Coverage strength per symptom archetype, sorted Strong → Moderate → Weak.
     /// Cached at startup for use in the opening greeting.
     pub archetype_coverage: Vec<ArchetypeCoverage>,
+    /// If true, include the LLM system prompt in each WS response (DEBUG_LLM_PROMPT=true).
+    pub debug_llm_prompt: bool,
 }
 
 impl AppState {
@@ -159,6 +161,11 @@ impl AppState {
             extractor.model_name()
         );
 
+        let debug_llm_prompt = std::env::var("DEBUG_LLM_PROMPT").map(|v| v == "true").unwrap_or(false);
+        if debug_llm_prompt {
+            eprintln!("  DEBUG_LLM_PROMPT=true — system prompts will be sent to client");
+        }
+
         Self {
             inner: Arc::new(AppStateInner {
                 graph,
@@ -172,6 +179,7 @@ impl AppState {
                 idisk,
                 suppkg,
                 archetype_coverage,
+                debug_llm_prompt,
             }),
         }
     }

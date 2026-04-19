@@ -52,6 +52,8 @@ struct ServerMessage {
     candidate_count: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     citations: Vec<CitationRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_llm_prompt: Option<String>,
 }
 
 impl ServerMessage {
@@ -65,6 +67,7 @@ impl ServerMessage {
             complete: None,
             candidate_count: None,
             citations: vec![],
+            debug_llm_prompt: None,
         }
     }
 
@@ -78,6 +81,7 @@ impl ServerMessage {
             complete: None,
             candidate_count: None,
             citations: vec![],
+            debug_llm_prompt: None,
         }
     }
 
@@ -91,6 +95,7 @@ impl ServerMessage {
             complete: None,
             candidate_count: None,
             citations: vec![],
+            debug_llm_prompt: None,
         }
     }
 
@@ -105,6 +110,7 @@ impl ServerMessage {
                 complete: Some(true),
                 candidate_count: None,
                 citations: vec![],
+            debug_llm_prompt: None,
             };
         }
         Self {
@@ -116,6 +122,7 @@ impl ServerMessage {
             complete: Some(result.complete),
             candidate_count: Some(result.candidate_count),
             citations: result.citations.clone(),
+            debug_llm_prompt: result.debug_llm_prompt.clone(),
         }
     }
 
@@ -129,6 +136,7 @@ impl ServerMessage {
             complete: None,
             candidate_count: None,
             citations: vec![],
+            debug_llm_prompt: None,
         }
     }
 
@@ -142,6 +150,7 @@ impl ServerMessage {
             complete: None,
             candidate_count: None,
             citations: vec![],
+            debug_llm_prompt: None,
         }
     }
 }
@@ -183,6 +192,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
         complete: false,
         candidate_count: 0,
         citations: vec![],
+        debug_llm_prompt: None,
     });
     let _ = send_json(&mut socket, &ServerMessage::from_turn(&opening_result)).await;
 
@@ -228,6 +238,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
                         complete: false,
                         candidate_count: 0,
                         citations: vec![],
+            debug_llm_prompt: None,
                     };
                     let _ = send_json(&mut socket, &ServerMessage::from_turn(&result)).await;
                     continue;
@@ -317,6 +328,7 @@ async fn generate_opening(state: &AppState, session_id: &Uuid) -> Option<TurnRes
         complete: false,
         candidate_count: 0,
         citations: vec![],
+        debug_llm_prompt: None,
     })
 }
 
