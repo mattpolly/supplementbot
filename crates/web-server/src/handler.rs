@@ -523,12 +523,10 @@ pub async fn process_turn(
         IntakePhase::Recommendation => "recommendation",
     };
 
-    // At recommendation phase, look up PubMed citations for each candidate.
-    let citations = if complete {
-        gather_citations(state, session_id).await
-    } else {
-        vec![]
-    };
+    // Look up PubMed citations for any candidate ingredients mentioned in the
+    // response. This runs on every turn — not just at recommendation — so
+    // the citations panel opens as soon as we first name a supplement.
+    let citations = gather_citations_for_response(state, session_id, &safe_response).await;
 
     let debug_llm_prompt = if state.inner.debug_llm_prompt {
         Some(intake_context.system_prompt.clone())
@@ -551,14 +549,14 @@ pub async fn process_turn(
 // Citation lookup
 // ---------------------------------------------------------------------------
 
-/// For each top candidate, resolve its CUI via the merge store and look up
-/// PubMed citations from SuppKG. Returns up to 3 citations per ingredient,
-/// sorted by confidence, deduped by PMID.
-async fn gather_citations(state: &AppState, session_id: &Uuid) -> Vec<CitationRef> {
-    let suppkg = match &state.inner.suppkg {
-        Some(kg) => kg.clone(),
-        None => return vec![],
-    };
+/// Gather citations for any candidate ingredients mentioned in `response_text`.
+/// Runs on every turn so the panel opens as soon as a supplement is named.
+async fn gather_citations_for_response(
+    state: &AppState,
+    session_id: &Uuid,
+    response_text: &str,
+) -> Vec<CitationRef> {
+    let response_lower = response_text.to_lowercase();
 
     let candidates: Vec<String> = match state.inner.sessions
         .with_session(session_id, |session| {
@@ -570,9 +568,33 @@ async fn gather_citations(state: &AppState, session_id: &Uuid) -> Vec<CitationRe
         None => return vec![],
     };
 
+    // Only gather citations for ingredients actually named in this response
+    let mentioned: Vec<String> = candidates
+        .into_iter()
+        .filter(|name| response_lower.contains(&name.to_lowercase()))
+        .collect();
+
+    if mentioned.is_empty() {
+        return vec![];
+    }
+
+    gather_citations_for_ingredients(state, &mentioned).await
+}
+
+/// Look up PubMed citations for a specific list of ingredient names.
+/// Returns up to 3 citations per ingredient, sorted by confidence, deduped by PMID.
+async fn gather_citations_for_ingredients(
+    state: &AppState,
+    ingredients: &[String],
+) -> Vec<CitationRef> {
+    let suppkg = match &state.inner.suppkg {
+        Some(kg) => kg.clone(),
+        None => return vec![],
+    };
+
     let mut result = Vec::new();
 
-    for ingredient in &candidates {
+    for ingredient in ingredients {
         // Resolve ingredient name → CUI via merge store
         let ingredient_cui = match state.inner.merge.cui_for(ingredient).await {
             Some(cui) => cui,
@@ -614,6 +636,22 @@ async fn gather_citations(state: &AppState, session_id: &Uuid) -> Vec<CitationRe
     }
 
     result
+}
+
+/// For each top candidate, resolve its CUI and look up PubMed citations.
+#[allow(dead_code)]
+async fn gather_citations(state: &AppState, session_id: &Uuid) -> Vec<CitationRef> {
+    let candidates: Vec<String> = match state.inner.sessions
+        .with_session(session_id, |session| {
+            session.candidates.top(10).iter().map(|c| c.ingredient.clone()).collect()
+        })
+        .await
+    {
+        Some(c) => c,
+        None => return vec![],
+    };
+
+    gather_citations_for_ingredients(state, &candidates).await
 }
 
 // ---------------------------------------------------------------------------
