@@ -312,16 +312,46 @@ pub async fn process_turn(
     // Step 7: Executor — run graph actions against supplement KG + iDISK
     let executor = GraphActionExecutor::new(&s.graph, &s.source, &s.merge, &s.idisk);
 
-    let all_symptoms: Vec<String> = s
+    let (all_symptoms, active_profiles_snap) = s
         .sessions
         .with_session(session_id, |session| {
-            session
+            let symptoms = session
                 .all_symptoms()
                 .into_iter()
                 .map(|s| s.to_string())
-                .collect()
+                .collect::<Vec<_>>();
+            let profiles = session.active_profiles.clone();
+            (symptoms, profiles)
         })
         .await?;
+
+    // Derive body systems from active symptom profiles so the executor can
+    // query ingredients_for_system when no symptom graph nodes exist.
+    // This bridges "nasal congestion" (no graph node) → "allergy" profile
+    // → immune archetype → "immune system" → Quercetin.
+    let mut profile_systems: Vec<String> = Vec::new();
+    for profile_id in &active_profiles_snap {
+        if let Some(sp) = s.intake_store.get_symptom_profile(profile_id).await {
+            // Profile-specific associated systems first
+            for sys in &sp.associated_systems {
+                if !profile_systems.contains(sys) {
+                    profile_systems.push(sys.clone());
+                }
+            }
+            // Archetype default systems as fallback
+            if let Some(arch) = s.intake_store.get_archetype(&sp.archetype_id).await {
+                for sys in &arch.default_systems {
+                    if !profile_systems.contains(sys) {
+                        profile_systems.push(sys.clone());
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[session {session_id}] executor systems from profiles: {:?}",
+        profile_systems
+    );
 
     let (candidate_names, disclosed_meds, disclosed_supps, lens_level) = s
         .sessions
@@ -345,6 +375,7 @@ pub async fn process_turn(
         .execute(
             &turn_action.graph_actions,
             &all_symptoms,
+            &profile_systems,
             &candidate_names,
             &disclosed_meds,
             &disclosed_supps,

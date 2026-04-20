@@ -92,10 +92,16 @@ impl<'a> GraphActionExecutor<'a> {
     }
 
     /// Execute a set of graph actions and return combined results.
+    ///
+    /// `systems` supplements `symptoms` for candidate lookup: when a user's
+    /// complaint maps to a body system but not a specific symptom node (e.g.
+    /// "nasal congestion" → immune system), system-level queries still surface
+    /// the right ingredients.
     pub async fn execute(
         &self,
         actions: &[GraphActionType],
         symptoms: &[String],
+        systems: &[String],
         candidate_names: &[String],
         disclosed_medications: &[String],
         disclosed_supplements: &[String],
@@ -106,7 +112,7 @@ impl<'a> GraphActionExecutor<'a> {
         for action in actions {
             match action {
                 GraphActionType::QueryCandidates => {
-                    self.query_candidates(symptoms, lens_level, &mut results)
+                    self.query_candidates(symptoms, systems, lens_level, &mut results)
                         .await;
                 }
                 GraphActionType::FindDiscriminators => {
@@ -149,6 +155,7 @@ impl<'a> GraphActionExecutor<'a> {
     async fn query_candidates(
         &self,
         symptoms: &[String],
+        systems: &[String],
         lens_level: f64,
         results: &mut ActionResults,
     ) {
@@ -164,33 +171,43 @@ impl<'a> GraphActionExecutor<'a> {
             ..Default::default()
         };
 
-        for symptom in symptoms {
-            let recs = qe.ingredients_for_symptom(symptom, &config).await;
-            for rec in recs {
-                // Check if already in results
-                if let Some(existing) = results
-                    .candidates
-                    .iter_mut()
-                    .find(|c| c.ingredient == rec.ingredient.name)
-                {
-                    // Update score if higher
-                    if rec.best_score > existing.score {
-                        existing.score = rec.best_score;
-                    }
-                } else {
-                    let explanations: Vec<String> = rec
-                        .paths
-                        .iter()
-                        .flat_map(|p| p.explanation.iter().cloned())
-                        .collect();
-
-                    results.candidates.push(CandidateResult {
-                        ingredient: rec.ingredient.name.clone(),
-                        score: rec.best_score,
-                        quality: format!("{:?}", rec.weakest_quality),
-                        path_explanations: explanations,
-                    });
+        // Helper closure to merge a recommendation result into results.candidates
+        let mut merge_rec = |rec: crate::query::RecommendationResult| {
+            if let Some(existing) = results
+                .candidates
+                .iter_mut()
+                .find(|c| c.ingredient == rec.ingredient.name)
+            {
+                if rec.best_score > existing.score {
+                    existing.score = rec.best_score;
                 }
+            } else {
+                let explanations: Vec<String> = rec
+                    .paths
+                    .iter()
+                    .flat_map(|p| p.explanation.iter().cloned())
+                    .collect();
+                results.candidates.push(CandidateResult {
+                    ingredient: rec.ingredient.name.clone(),
+                    score: rec.best_score,
+                    quality: format!("{:?}", rec.weakest_quality),
+                    path_explanations: explanations,
+                });
+            }
+        };
+
+        for symptom in symptoms {
+            for rec in qe.ingredients_for_symptom(symptom, &config).await {
+                merge_rec(rec);
+            }
+        }
+
+        // When symptom nodes don't exist in the graph (e.g. "nasal congestion"
+        // has no node but maps to "immune system" via the allergy profile),
+        // query by system so we still surface relevant candidates.
+        for system in systems {
+            for rec in qe.ingredients_for_system(system, &config).await {
+                merge_rec(rec);
             }
         }
 
