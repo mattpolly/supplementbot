@@ -73,7 +73,7 @@ impl KnowledgeGraph {
     pub async fn open(url: &str, user: &str, pass: &str) -> Result<Self, surrealdb::Error> {
         let db = surrealdb::engine::any::connect(url).await?;
         db.signin(Root { username: user.to_string(), password: pass.to_string() }).await?;
-        db.use_ns("supplementbot").use_db("graph").await?;
+        db.use_ns("supplementbot").use_db("supplementbot").await?;
         let _: surrealdb::Result<Vec<serde_json::Value>> = db
             .query("DEFINE TABLE edge TYPE RELATION IN node OUT node")
             .await
@@ -84,14 +84,14 @@ impl KnowledgeGraph {
     /// Open an existing embedded RocksDB graph (used by the migrate command only).
     pub async fn open_embedded(path: &str) -> Result<Self, surrealdb::Error> {
         let db = surrealdb::engine::any::connect(format!("rocksdb:{path}")).await?;
-        db.use_ns("supplementbot").use_db("graph").await?;
+        db.use_ns("supplementbot").use_db("supplementbot").await?;
         Ok(Self { db })
     }
 
     /// Create an in-memory graph (for tests).
     pub async fn in_memory() -> Result<Self, surrealdb::Error> {
         let db = surrealdb::engine::any::connect("memory").await?;
-        db.use_ns("supplementbot").use_db("graph").await?;
+        db.use_ns("supplementbot").use_db("supplementbot").await?;
         Ok(Self { db })
     }
 
