@@ -201,24 +201,14 @@ async fn try_cui_based(
         return 0;
     }
 
-    let mut stored = 0;
+    // Collect all citation records, then insert in batch (1 dedup query, not N)
+    let mut records: Vec<CitationRecord> = Vec::new();
 
     for (target_cui, predicate) in outgoing {
         let citations = suppkg.citations_for(&ingredient_cui, target_cui, None);
         let target_term = suppkg.first_term_for(target_cui).to_string();
 
         for citation in citations {
-            let record = CitationRecord {
-                source_node: ingredient_name.to_string(),
-                target_node: target_term.clone(),
-                edge_type: predicate.to_string(),
-                pmid: citation.pmid.to_string(),
-                sentence: citation.sentence.clone(),
-                confidence: citation.confidence,
-                suppkg_predicate: predicate.to_string(),
-                source_cui: ingredient_cui.clone(),
-                target_cui: target_cui.to_string(),
-            };
             if sample.len() < 20 {
                 sample.push(CitationRef {
                     source_node: ingredient_name.to_string(),
@@ -228,13 +218,21 @@ async fn try_cui_based(
                     suppkg_predicate: predicate.to_string(),
                 });
             }
-            if source_store.record_citation(&record).await {
-                stored += 1;
-            }
+            records.push(CitationRecord {
+                source_node: ingredient_name.to_string(),
+                target_node: target_term.clone(),
+                edge_type: predicate.to_string(),
+                pmid: citation.pmid.to_string(),
+                sentence: citation.sentence.clone(),
+                confidence: citation.confidence,
+                suppkg_predicate: predicate.to_string(),
+                source_cui: ingredient_cui.clone(),
+                target_cui: target_cui.to_string(),
+            });
         }
     }
 
-    stored
+    source_store.record_citations_batch(&records).await
 }
 
 /// Store sentence search matches for a single ingredient.
@@ -246,21 +244,10 @@ async fn store_sentence_matches(
     source_store: &SourceStore,
     sample: &mut Vec<CitationRef>,
 ) -> usize {
-    let mut stored = 0;
+    let mut records: Vec<CitationRecord> = Vec::new();
 
     for m in matches {
         let target_term = suppkg.first_term_for(&m.target_cui).to_string();
-        let record = CitationRecord {
-            source_node: ingredient_name.to_string(),
-            target_node: target_term.clone(),
-            edge_type: m.predicate.clone(),
-            pmid: m.pmid.to_string(),
-            sentence: m.sentence.clone(),
-            confidence: m.confidence,
-            suppkg_predicate: m.predicate.clone(),
-            source_cui: m.source_cui.clone(),
-            target_cui: m.target_cui.clone(),
-        };
         if sample.len() < 20 {
             sample.push(CitationRef {
                 source_node: ingredient_name.to_string(),
@@ -270,12 +257,20 @@ async fn store_sentence_matches(
                 suppkg_predicate: m.predicate.clone(),
             });
         }
-        if source_store.record_citation(&record).await {
-            stored += 1;
-        }
+        records.push(CitationRecord {
+            source_node: ingredient_name.to_string(),
+            target_node: target_term.clone(),
+            edge_type: m.predicate.clone(),
+            pmid: m.pmid.to_string(),
+            sentence: m.sentence.clone(),
+            confidence: m.confidence,
+            suppkg_predicate: m.predicate.clone(),
+            source_cui: m.source_cui.clone(),
+            target_cui: m.target_cui.clone(),
+        });
     }
 
-    stored
+    source_store.record_citations_batch(&records).await
 }
 
 // ---------------------------------------------------------------------------

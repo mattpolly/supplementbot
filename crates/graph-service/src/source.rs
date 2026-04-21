@@ -462,6 +462,9 @@ impl SourceStore {
     /// Deduplicates by (source_node, pmid) — if a citation for this ingredient
     /// and PMID already exists, it is skipped. This makes citation backing
     /// idempotent: safe to re-run without creating duplicates.
+    ///
+    /// For bulk inserts, prefer `record_citations_batch` which fetches existing
+    /// PMIDs in a single query instead of one round-trip per citation.
     pub async fn record_citation(&self, citation: &CitationRecord) -> bool {
         // Check for existing citation with same source_node + pmid
         #[derive(SurrealValue)]
@@ -491,6 +494,50 @@ impl SourceStore {
             .content(citation.clone())
             .await;
         true
+    }
+
+    /// Fetch all existing PMIDs for an ingredient in one query.
+    /// Used by citation backing to dedup in-memory instead of per-citation round-trips.
+    pub async fn existing_pmids_for(&self, source_node: &str) -> std::collections::HashSet<String> {
+        #[derive(SurrealValue)]
+        struct PmidRow {
+            pmid: String,
+        }
+        let rows: Vec<PmidRow> = self
+            .db
+            .query("SELECT pmid FROM edge_citation WHERE source_node = $src")
+            .bind(("src", source_node.to_lowercase()))
+            .await
+            .unwrap_or_else(|_| unreachable!())
+            .take(0)
+            .unwrap_or_default();
+        rows.into_iter().map(|r| r.pmid).collect()
+    }
+
+    /// Record multiple citations for a single ingredient, deduplicating in bulk.
+    ///
+    /// Fetches existing PMIDs once, then inserts only new ones. Much faster than
+    /// calling `record_citation` in a loop (1 query instead of N).
+    pub async fn record_citations_batch(&self, citations: &[CitationRecord]) -> usize {
+        if citations.is_empty() {
+            return 0;
+        }
+        let source_node = &citations[0].source_node;
+        let existing = self.existing_pmids_for(source_node).await;
+
+        let mut stored = 0;
+        for citation in citations {
+            if existing.contains(&citation.pmid) {
+                continue;
+            }
+            let _: Result<Option<CitationRecord>, _> = self
+                .db
+                .create("edge_citation")
+                .content(citation.clone())
+                .await;
+            stored += 1;
+        }
+        stored
     }
 
     /// Get all citations for a specific edge.
