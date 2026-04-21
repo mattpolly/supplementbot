@@ -112,12 +112,12 @@ pub async fn run_citation_backing_with_registry(
         edges_checked += 1;
 
         // Strategy 1: CUI-based resolution (precise)
-        let cui_citations = try_cui_based(
+        let (cui_found, cui_stored) = try_cui_based(
             &ingredient_name, suppkg, merge_store, source_store, &mut sample,
         ).await;
 
-        if cui_citations > 0 {
-            citations_stored += cui_citations;
+        if cui_found > 0 {
+            citations_stored += cui_stored;
             edges_backed += 1;
             cui_resolved += 1;
             continue;
@@ -126,23 +126,17 @@ pub async fn run_citation_backing_with_registry(
         // Collect for batch sentence search
         let search_terms = registry.search_terms_for(&ingredient_name).await;
         if !search_terms.is_empty() {
-            eprintln!("  [sentence-search] {} → terms: {:?}", ingredient_name, search_terms);
             sentence_search_ingredients.insert(ingredient_name, search_terms);
-        } else {
-            eprintln!("  [sentence-search] {} → NO search terms in registry", ingredient_name);
         }
     }
 
     // Phase 2: Single-pass batch sentence search for all remaining ingredients.
     // 5 citations per (ingredient, target_cui) pair for breadth across use cases.
     if !sentence_search_ingredients.is_empty() {
-        eprintln!("  [sentence-search] batch scanning {} ingredients...", sentence_search_ingredients.len());
         let batch_results =
             suppkg.search_sentences_batch(&sentence_search_ingredients, 5);
-        eprintln!("  [sentence-search] batch returned {} ingredients with matches", batch_results.len());
 
         for (ingredient_name, matches) in &batch_results {
-            eprintln!("  [sentence-search] {} → {} matches", ingredient_name, matches.len());
             let stored = store_sentence_matches(
                 ingredient_name, matches, suppkg, source_store, &mut sample,
             ).await;
@@ -175,14 +169,15 @@ pub async fn run_citation_backing_with_registry(
 }
 
 /// Try to resolve an ingredient via CUI and store citations from SuppKG edges.
-/// Returns the number of citations stored (0 if CUI resolution failed).
+/// Returns (citations_found, citations_stored). citations_found > 0 means CUI
+/// resolution succeeded (even if all were deduped on re-run).
 async fn try_cui_based(
     ingredient_name: &str,
     suppkg: &SuppKg,
     merge_store: &MergeStore,
     source_store: &SourceStore,
     sample: &mut Vec<CitationRef>,
-) -> usize {
+) -> (usize, usize) {
     // CUI resolution priority: hardcoded override → merge store → term index
     let ingredient_cui = if let Some(override_cui) = hardcoded_cui(ingredient_name) {
         if !suppkg.outgoing_edges(override_cui).is_empty() {
@@ -192,19 +187,19 @@ async fn try_cui_based(
         } else if let Some(m) = suppkg.resolve_cui(ingredient_name) {
             m.cui
         } else {
-            return 0;
+            return (0, 0);
         }
     } else if let Some(c) = merge_store.cui_for(ingredient_name).await {
         c
     } else if let Some(m) = suppkg.resolve_cui(ingredient_name) {
         m.cui
     } else {
-        return 0;
+        return (0, 0);
     };
 
     let outgoing = suppkg.outgoing_edges(&ingredient_cui);
     if outgoing.is_empty() {
-        return 0;
+        return (0, 0);
     }
 
     // Collect all citation records, then insert in batch (1 dedup query, not N)
@@ -238,7 +233,9 @@ async fn try_cui_based(
         }
     }
 
-    source_store.record_citations_batch(&records).await
+    let found = records.len();
+    let stored = source_store.record_citations_batch(&records).await;
+    (found, stored)
 }
 
 /// Store sentence search matches for a single ingredient.
