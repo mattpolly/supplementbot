@@ -558,15 +558,36 @@ async fn gather_citations_for_response(
 ) -> Vec<CitationRef> {
     let response_lower = response_text.to_lowercase();
 
-    let candidates: Vec<String> = match state.inner.sessions
+    let (candidates, context_terms): (Vec<String>, Vec<String>) = match state.inner.sessions
         .with_session(session_id, |session| {
-            session.candidates.top(10).iter().map(|c| c.ingredient.clone()).collect()
+            let cands = session.candidates.top(10).iter().map(|c| c.ingredient.clone()).collect();
+            // Collect symptoms and systems from the conversation for relevance ranking
+            let mut terms: Vec<String> = Vec::new();
+            for cc in &session.chief_complaints {
+                for s in &cc.mapped_symptoms {
+                    terms.push(s.to_lowercase());
+                }
+                for s in &cc.mapped_systems {
+                    terms.push(s.to_lowercase());
+                }
+            }
+            (cands, terms)
         })
         .await
     {
         Some(c) => c,
         None => return vec![],
     };
+
+    // Also extract keywords from the response text itself
+    let mut all_context = context_terms;
+    // Add significant words from response (skip short/common words)
+    for word in response_lower.split_whitespace() {
+        let w = word.trim_matches(|c: char| !c.is_alphanumeric());
+        if w.len() > 3 {
+            all_context.push(w.to_string());
+        }
+    }
 
     // Only gather citations for ingredients actually named in this response
     let mentioned: Vec<String> = candidates
@@ -578,44 +599,60 @@ async fn gather_citations_for_response(
         return vec![];
     }
 
-    gather_citations_for_ingredients(state, &mentioned).await
+    gather_citations_for_ingredients(state, &mentioned, &all_context).await
 }
 
 /// Look up PubMed citations for a specific list of ingredient names.
-/// Returns up to 3 citations per ingredient, sorted by confidence, deduped by PMID.
+/// Returns up to 3 citations per ingredient, preferring those relevant to the
+/// conversation context (symptoms, systems, response keywords).
 async fn gather_citations_for_ingredients(
     state: &AppState,
     ingredients: &[String],
+    context_terms: &[String],
 ) -> Vec<CitationRef> {
     let mut result = Vec::new();
 
     for ingredient in ingredients {
         // Query the pre-populated edge_citation table by ingredient name.
-        // Citations are stored during training by run_citation_backing() —
-        // no CUI lookup needed at query time.
         let records = state.inner.source.citations_for_ingredient(ingredient).await;
 
         let mut seen_pmids = std::collections::HashSet::new();
-        let mut ingredient_citations: Vec<CitationRef> = records
+        let mut ingredient_citations: Vec<(f64, CitationRef)> = records
             .into_iter()
             .filter_map(|r| {
                 let pmid: u64 = r.pmid.parse().ok()?;
                 if pmid == 0 { return None; }
                 if !seen_pmids.insert(pmid) { return None; }
-                Some(CitationRef {
+
+                // Compute relevance: how well does this citation match the conversation?
+                let sentence_lower = r.sentence.to_lowercase();
+                let target_lower = r.target_node.to_lowercase();
+                let mut relevance: f64 = 0.0;
+                for term in context_terms {
+                    if target_lower.contains(term.as_str()) {
+                        relevance += 2.0; // Strong signal: target node matches a discussed system/symptom
+                    }
+                    if sentence_lower.contains(term.as_str()) {
+                        relevance += 0.5; // Weaker signal: keyword appears in sentence text
+                    }
+                }
+                // Composite score: relevance first, confidence as tiebreaker
+                let score = relevance + r.confidence;
+
+                Some((score, CitationRef {
                     ingredient: ingredient.clone(),
                     pmid,
                     url: format!("https://pubmed.ncbi.nlm.nih.gov/{}/", pmid),
                     sentence: r.sentence,
                     confidence: r.confidence,
-                })
+                }))
             })
             .collect();
 
-        // Sort by confidence descending, take top 3 per ingredient
-        ingredient_citations.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by relevance score descending, take top 3
+        ingredient_citations.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         ingredient_citations.truncate(3);
-        result.extend(ingredient_citations);
+        result.extend(ingredient_citations.into_iter().map(|(_, c)| c));
     }
 
     result
@@ -634,7 +671,7 @@ async fn gather_citations(state: &AppState, session_id: &Uuid) -> Vec<CitationRe
         None => return vec![],
     };
 
-    gather_citations_for_ingredients(state, &candidates).await
+    gather_citations_for_ingredients(state, &candidates, &[]).await
 }
 
 // ---------------------------------------------------------------------------
