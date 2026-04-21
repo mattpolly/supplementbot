@@ -579,12 +579,18 @@ async fn gather_citations_for_response(
         None => return vec![],
     };
 
-    // Also extract keywords from the response text itself
+    // Extract medically-relevant keywords from the response text
     let mut all_context = context_terms;
-    // Add significant words from response (skip short/common words)
+    let stop_words: &[&str] = &[
+        "that", "this", "with", "from", "your", "have", "been", "what",
+        "would", "could", "should", "about", "like", "some", "other",
+        "more", "also", "just", "very", "well", "much", "still", "long",
+        "help", "looking", "options", "dealing", "described", "based",
+        "today", "lately", "supplement", "supplements", "recommend",
+    ];
     for word in response_lower.split_whitespace() {
         let w = word.trim_matches(|c: char| !c.is_alphanumeric());
-        if w.len() > 3 {
+        if w.len() > 4 && !stop_words.contains(&w) {
             all_context.push(w.to_string());
         }
     }
@@ -617,42 +623,46 @@ async fn gather_citations_for_ingredients(
         let records = state.inner.source.citations_for_ingredient(ingredient).await;
 
         let mut seen_pmids = std::collections::HashSet::new();
-        let mut ingredient_citations: Vec<(f64, CitationRef)> = records
-            .into_iter()
-            .filter_map(|r| {
-                let pmid: u64 = r.pmid.parse().ok()?;
-                if pmid == 0 { return None; }
-                if !seen_pmids.insert(pmid) { return None; }
+        let mut relevant: Vec<(f64, CitationRef)> = Vec::new();
+        let mut fallback: Vec<(f64, CitationRef)> = Vec::new();
 
-                // Compute relevance: how well does this citation match the conversation?
-                let sentence_lower = r.sentence.to_lowercase();
-                let target_lower = r.target_node.to_lowercase();
-                let mut relevance: f64 = 0.0;
-                for term in context_terms {
-                    if target_lower.contains(term.as_str()) {
-                        relevance += 2.0; // Strong signal: target node matches a discussed system/symptom
-                    }
-                    if sentence_lower.contains(term.as_str()) {
-                        relevance += 0.5; // Weaker signal: keyword appears in sentence text
-                    }
+        for r in records {
+            let pmid: u64 = match r.pmid.parse().ok() {
+                Some(p) if p > 0 => p,
+                _ => continue,
+            };
+            if !seen_pmids.insert(pmid) { continue; }
+
+            let sentence_lower = r.sentence.to_lowercase();
+            let mut keyword_hits: f64 = 0.0;
+            for term in context_terms {
+                if sentence_lower.contains(term.as_str()) {
+                    keyword_hits += 1.0;
                 }
-                // Composite score: relevance first, confidence as tiebreaker
-                let score = relevance + r.confidence;
+            }
 
-                Some((score, CitationRef {
-                    ingredient: ingredient.clone(),
-                    pmid,
-                    url: format!("https://pubmed.ncbi.nlm.nih.gov/{}/", pmid),
-                    sentence: r.sentence,
-                    confidence: r.confidence,
-                }))
-            })
-            .collect();
+            let cite = CitationRef {
+                ingredient: ingredient.clone(),
+                pmid,
+                url: format!("https://pubmed.ncbi.nlm.nih.gov/{}/", pmid),
+                sentence: r.sentence,
+                confidence: r.confidence,
+            };
 
-        // Sort by relevance score descending, take top 3
-        ingredient_citations.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        ingredient_citations.truncate(3);
-        result.extend(ingredient_citations.into_iter().map(|(_, c)| c));
+            if keyword_hits > 0.0 {
+                // Score: keyword hits dominate, confidence breaks ties
+                relevant.push((keyword_hits * 10.0 + r.confidence, cite));
+            } else {
+                fallback.push((r.confidence, cite));
+            }
+        }
+
+        // Prefer citations that match conversation context; fall back to
+        // confidence-only if nothing relevant was found
+        let chosen = if relevant.is_empty() { &mut fallback } else { &mut relevant };
+        chosen.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        chosen.truncate(3);
+        result.extend(chosen.drain(..).map(|(_, c)| c));
     }
 
     result
