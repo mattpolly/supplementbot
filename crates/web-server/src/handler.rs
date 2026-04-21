@@ -587,47 +587,30 @@ async fn gather_citations_for_ingredients(
     state: &AppState,
     ingredients: &[String],
 ) -> Vec<CitationRef> {
-    let suppkg = match &state.inner.suppkg {
-        Some(kg) => kg.clone(),
-        None => return vec![],
-    };
-
     let mut result = Vec::new();
 
     for ingredient in ingredients {
-        // Resolve ingredient name → CUI via merge store
-        let ingredient_cui = match state.inner.merge.cui_for(ingredient).await {
-            Some(cui) => cui,
-            None => {
-                // Fall back to SuppKG's own term index
-                match suppkg.resolve_cui(ingredient) {
-                    Some(m) => m.cui,
-                    None => continue,
-                }
-            }
-        };
-
-        // Get all outgoing edges from this ingredient CUI in SuppKG
-        let outgoing = suppkg.outgoing_edges(&ingredient_cui);
+        // Query the pre-populated edge_citation table by ingredient name.
+        // Citations are stored during training by run_citation_backing() —
+        // no CUI lookup needed at query time.
+        let records = state.inner.source.citations_for_ingredient(ingredient).await;
 
         let mut seen_pmids = std::collections::HashSet::new();
-        let mut ingredient_citations: Vec<CitationRef> = Vec::new();
-
-        for (target_cui, _predicate) in outgoing {
-            let cites = suppkg.citations_for(&ingredient_cui, target_cui, None);
-            for cite in cites {
-                if cite.pmid == 0 { continue; }
-                if seen_pmids.contains(&cite.pmid) { continue; }
-                seen_pmids.insert(cite.pmid);
-                ingredient_citations.push(CitationRef {
+        let mut ingredient_citations: Vec<CitationRef> = records
+            .into_iter()
+            .filter_map(|r| {
+                let pmid: u64 = r.pmid.parse().ok()?;
+                if pmid == 0 { return None; }
+                if !seen_pmids.insert(pmid) { return None; }
+                Some(CitationRef {
                     ingredient: ingredient.clone(),
-                    pmid: cite.pmid,
-                    url: format!("https://pubmed.ncbi.nlm.nih.gov/{}/", cite.pmid),
-                    sentence: cite.sentence.clone(),
-                    confidence: cite.confidence,
-                });
-            }
-        }
+                    pmid,
+                    url: format!("https://pubmed.ncbi.nlm.nih.gov/{}/", pmid),
+                    sentence: r.sentence,
+                    confidence: r.confidence,
+                })
+            })
+            .collect();
 
         // Sort by confidence descending, take top 3 per ingredient
         ingredient_citations.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));

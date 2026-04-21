@@ -394,3 +394,105 @@ The following design decisions are already protecting future evolution:
 - Affordance-based reasoning ("affords sleep quality" not "cures insomnia") keeps semantics rich while avoiding medical claims
 
 **Strategy: ship the single-ingredient pipeline, prove it works, then widen the lens.**
+
+---
+
+## Citation Strategy: Multi-Source Ingredient Knowledge Base (2026-04-20)
+
+### The Problem
+
+SuppKG was our sole source of PubMed-backed citations for the chat UI. It has 56,635 nodes, 595,222 edges, and 1.2M citations across 326k unique PMIDs — but its CUI namespace is frozen to UMLS 2006AA and iDISK v1's internal `DC*` identifiers. Modern UMLS CUIs don't match. Of our initial 19 test ingredients, only 6 could be resolved via hardcoded CUI overrides. The remaining ~13 had zero citations despite having abundant mentions in SuppKG's own sentence data.
+
+We investigated CTD, iDISK 2.0, UMLS API, SemMedDB (deprecated), and DrugCentral. None bridged the gap. See `docs/PROBLEMS.md` for the full dead-end chronology.
+
+### The Breakthrough: Sentence-Based SuppKG Mining
+
+SuppKG's citations contain the ingredient name in the supporting sentence text, even when the CUI doesn't match. Searching sentences by ingredient name (with synonyms) instead of by CUI lookup recovers citations for all 19 ingredients:
+
+| Ingredient | PMIDs via sentence search |
+|---|---|
+| probiotics | 8,519 |
+| fish oil | 6,490 |
+| calcium | 5,980 |
+| vitamin d | 3,385 |
+| iron | 3,226 |
+| zinc | 2,770 |
+| vitamin c | 1,517 |
+| magnesium | 1,203 |
+| gaba | 976 |
+| quercetin | 823 |
+| turmeric | 648 |
+| vitamin b complex | 461 |
+| coq10 | 380 |
+| melatonin | 347 |
+| nac | 300 |
+| alpha-lipoic acid | 260 |
+| ashwagandha | 151 |
+| rhodiola | 76 |
+| theanine | 68 |
+
+This approach scales to hundreds of ingredients without any CUI resolution.
+
+### Multi-Source Ingredient Knowledge Base
+
+Rather than depending on any single external KG, we build our own ingredient knowledge base that aggregates across multiple sources. Each ingredient stores multiple external identifiers as cross-references:
+
+**Per-ingredient record:**
+- Ingredient name (primary key) + synonyms/common names
+- SuppKG 2006 CUI (for sentence-mining SuppKG v1 citations)
+- Modern UMLS CUI (from UMLS API, for PubMed searches and interop)
+- iDISK ID + iDISK UMLS CUI (for metadata: background, mechanism of action, safety, source material)
+- CTD MeSH ID (for curated chemical-disease associations and their PMIDs)
+
+**Data sources and what each contributes:**
+
+| Source | What it gives us | Identifier |
+|---|---|---|
+| SuppKG v1 | PMIDs + supporting sentences + confidence scores + predicates (mechanism-level edges) | 2006 UMLS CUI / DC* CUI (bypassed via sentence search) |
+| iDISK 2.0 | Ingredient metadata (background, mechanism of action, safety text), synonyms, common names | iDISK_ID + UMLS CUI |
+| CTD | Curated chemical-disease associations with PMIDs, monthly updates | MeSH ID |
+| UMLS API | Modern CUIs, semantic types, cross-references | Current UMLS CUI |
+| PubMed E-utilities | Fresh literature search by ingredient name or MeSH term | PMID |
+
+### Implementation Plan
+
+**Phase 1: Sentence-based SuppKG mining (immediate)**
+- Replace CUI-based lookup in `run_citation_backing()` with sentence text search
+- For each ingredient, search all SuppKG sentences for the ingredient name + known synonyms
+- Store matches in `edge_citation` keyed by ingredient name (existing schema works as-is)
+- This unblocks citations for all current ingredients with zero new infrastructure
+
+**Phase 2: Ingredient registry with multi-source IDs**
+- Build an ingredient registry table storing name, synonyms, and all external IDs per ingredient
+- Populate from iDISK 2.0 DSI.csv (7,876 ingredients with UMLS CUIs, common names, metadata)
+- Enrich with CTD MeSH IDs from CTD_chemicals.csv (already downloaded)
+- Enrich with modern UMLS CUIs from supplement_cuis.jsonl / UMLS API
+- This becomes the canonical ingredient vocabulary for the system
+
+**Phase 3: CTD integration**
+- Use CTD's curated chemical-disease file for additional PMIDs per ingredient
+- CTD edges are disease-level (not mechanism-level), so they cannot be surfaced as supplement claims directly
+- Use CTD PMIDs as a discovery layer: fetch the abstract from PubMed, extract mechanism-level sentences via LLM
+- This reframes disease-associated papers into legally safe mechanism/body-system language
+
+**Phase 4: PubMed refresh pipeline**
+- Using modern UMLS CUIs and MeSH IDs, run annual PubMed E-utilities searches per ingredient
+- Fetch new abstracts published since last training run
+- Extract mechanism-level supporting sentences (LLM-based)
+- Append to citation store with provenance tracking
+- This keeps the citation base growing without rebuilding the entire pipeline
+
+### Key Design Decisions
+
+- **Ingredient name is the primary key**, not any external CUI. External IDs are cross-references, not identity.
+- **SuppKG is mined by sentence text**, not by CUI resolution. This sidesteps the 2006 UMLS version lock entirely.
+- **CTD disease edges are never surfaced directly** to users. They are a PMID discovery source only. Mechanism-level sentences are extracted from the underlying papers. This maintains legal safety under the affordance model.
+- **iDISK provides the vocabulary layer** (names, synonyms, background text) but not citations (it has no PMIDs).
+- **Dual CUI storage** (2006 + current) preserves backward compatibility with SuppKG while enabling modern PubMed search and interoperability with other biomedical systems.
+
+### Coverage Notes
+
+- **CTD coverage**: 18/19 test ingredients matched. Missing: probiotics (category, not a chemical). CTD has strong coverage for common supplements but uses pharmaceutical names (Acetylcysteine, Thioctic Acid, Ubiquinone). The ingredient registry maps consumer names to CTD names.
+- **iDISK coverage**: 7,876 dietary supplement ingredients. All 19 test ingredients found. Rich synonym/common name data.
+- **SuppKG sentence coverage**: All 19 test ingredients found via sentence search. Coverage varies (probiotics: 8,519 PMIDs; theanine: 68 PMIDs) but every ingredient has at least some citations.
+- **Probiotics** remains the hardest ingredient across all sources because it's a category. Strategy: search for major strain families (Lactobacillus, Bifidobacterium, Saccharomyces) and aggregate under the "probiotics" umbrella.

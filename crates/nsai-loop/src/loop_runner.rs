@@ -83,6 +83,8 @@ pub struct NsaiLoop<'a> {
     source_store: Option<&'a SourceStore>,
     suppkg: Option<&'a SuppKg>,
     merge_store: Option<&'a MergeStore>,
+    umls_api_key: Option<String>,
+    cui_cache_path: Option<std::path::PathBuf>,
 }
 
 impl<'a> NsaiLoop<'a> {
@@ -95,7 +97,15 @@ impl<'a> NsaiLoop<'a> {
             source_store: None,
             suppkg: None,
             merge_store: None,
+            umls_api_key: None,
+            cui_cache_path: None,
         }
+    }
+
+    pub fn with_umls(mut self, api_key: String, cache_path: std::path::PathBuf) -> Self {
+        self.umls_api_key = Some(api_key);
+        self.cui_cache_path = Some(cache_path);
+        self
     }
 
     pub fn with_config(mut self, config: LoopConfig) -> Self {
@@ -320,6 +330,8 @@ impl<'a> NsaiLoop<'a> {
                 merge,
                 correlation_id,
                 self.sink,
+                self.umls_api_key.as_deref(),
+                self.cui_cache_path.as_deref(),
             )
             .await;
             synonym_cuis_assigned = syn_result.cuis_assigned;

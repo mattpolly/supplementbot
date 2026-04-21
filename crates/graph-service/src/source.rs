@@ -458,12 +458,39 @@ impl SourceStore {
     // -- Citation methods -----------------------------------------------------
 
     /// Record a PubMed citation backing a specific edge.
-    pub async fn record_citation(&self, citation: &CitationRecord) {
+    ///
+    /// Deduplicates by (source_node, pmid) — if a citation for this ingredient
+    /// and PMID already exists, it is skipped. This makes citation backing
+    /// idempotent: safe to re-run without creating duplicates.
+    pub async fn record_citation(&self, citation: &CitationRecord) -> bool {
+        // Check for existing citation with same source_node + pmid
+        #[derive(SurrealValue)]
+        struct CountResult {
+            count: u64,
+        }
+        let existing: Vec<CountResult> = self
+            .db
+            .query(
+                "SELECT count() AS count FROM edge_citation \
+                 WHERE source_node = $src AND pmid = $pmid GROUP ALL",
+            )
+            .bind(("src", citation.source_node.clone()))
+            .bind(("pmid", citation.pmid.clone()))
+            .await
+            .unwrap_or_else(|_| unreachable!())
+            .take(0)
+            .unwrap_or_default();
+
+        if existing.first().map(|r| r.count).unwrap_or(0) > 0 {
+            return false; // Already exists
+        }
+
         let _: Result<Option<CitationRecord>, _> = self
             .db
             .create("edge_citation")
             .content(citation.clone())
             .await;
+        true
     }
 
     /// Get all citations for a specific edge.

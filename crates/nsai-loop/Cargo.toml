@@ -11,6 +11,7 @@ graph-service = { path = "../graph-service" }
 llm-client = { path = "../llm-client" }
 suppkg = { path = "../suppkg" }
 tokio = { version = "1", features = ["full"] }
+umls-client = { path = "../umls-client" }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

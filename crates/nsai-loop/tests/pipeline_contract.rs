@@ -357,7 +357,16 @@ async fn test_pipeline_citation_backing_stores_citations() {
 
     nsai.run("Magnesium", &graph, corr_id).await;
 
-    // Run citation backing
+    // Citation backing already ran inside nsai.run() — verify it stored citations.
+    // Running it again should be a no-op due to deduplication.
+    let count_after_loop = source_store.citation_count().await;
+    assert!(
+        count_after_loop >= 1,
+        "NSAI loop should have stored citations (found {})",
+        count_after_loop
+    );
+
+    // Re-run citation backing — should be idempotent (dedup prevents duplicates)
     let result = nsai_loop::citations::run_citation_backing(
         &graph,
         &suppkg,
@@ -368,21 +377,14 @@ async fn test_pipeline_citation_backing_stores_citations() {
     )
     .await;
 
-    // Should find and store at least one citation
-    // (our SuppKG has magnesium→muscular system AFFECTS and magnesium→sleep quality AFFECTS)
-    assert!(
-        result.edges_backed >= 1,
-        "should back at least one edge with a citation (backed: {}, checked: {})",
-        result.edges_backed,
-        result.edges_checked
+    assert_eq!(
+        result.citations_stored, 0,
+        "re-run should store 0 new citations (dedup)"
     );
-    assert!(
-        result.citations_stored >= 1,
-        "should store at least one citation"
-    );
-    assert!(
-        source_store.citation_count().await >= 1,
-        "citation table should have at least one record"
+    assert_eq!(
+        source_store.citation_count().await,
+        count_after_loop,
+        "citation count should not change on re-run"
     );
 }
 

@@ -25,6 +25,25 @@ pub struct Citation {
     pub confidence: f64,
 }
 
+/// A citation found by searching sentence text for ingredient names.
+#[derive(Debug, Clone)]
+pub struct SentenceMatch {
+    /// The CUI of the source node in SuppKG
+    pub source_cui: String,
+    /// The CUI of the target node in SuppKG
+    pub target_cui: String,
+    /// The SuppKG predicate (e.g., AFFECTS, STIMULATES)
+    pub predicate: String,
+    /// PubMed ID (0 if from v2 edgelist which lacks PMIDs)
+    pub pmid: u64,
+    /// The supporting sentence that matched
+    pub sentence: String,
+    /// SuppKG's confidence score (0.0 if from v2 edgelist)
+    pub confidence: f64,
+    /// Which search term triggered the match
+    pub matched_term: String,
+}
+
 /// Result of resolving a node name to a CUI
 #[derive(Debug, Clone)]
 pub struct CuiMatch {

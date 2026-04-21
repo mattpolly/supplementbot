@@ -6,3 +6,4 @@ pub mod graph;
 pub mod lens;
 pub mod query;
 pub mod intake;
+pub mod registry;

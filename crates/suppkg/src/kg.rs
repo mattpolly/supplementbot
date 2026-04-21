@@ -177,6 +177,53 @@ impl SuppKg {
         })
     }
 
+    /// Resolve a node name to a CUI with fallbacks for ingredient names that
+    /// don't appear verbatim in SuppKG's term list.
+    ///
+    /// Strategy (in order):
+    ///   1. Exact match (delegates to resolve_cui)
+    ///   2. "{name} supplement" — covers "zinc" → "zinc supplement"
+    ///   3. First term that starts with "{name} " — covers partial matches
+    pub fn resolve_cui_fuzzy(&self, name: &str) -> Option<CuiMatch> {
+        // 1. Exact
+        if let Some(m) = self.resolve_cui(name) {
+            return Some(m);
+        }
+
+        let key = name.to_lowercase();
+
+        // 2. "{name} supplement"
+        let supplement_key = format!("{} supplement", key);
+        if let Some(cui) = self.term_to_cui.get(&supplement_key) {
+            if let Some(node) = self.cui_to_node.get(cui) {
+                return Some(CuiMatch {
+                    cui: cui.clone(),
+                    matched_term: supplement_key,
+                    terms: node.terms.clone(),
+                    semtypes: node.semtypes.clone(),
+                });
+            }
+        }
+
+        // 3. First term that starts with "{name} " (space-bounded to avoid
+        //    false matches like "zinc" matching "zinc-finger protein")
+        let prefix = format!("{} ", key);
+        for (term, cui) in &self.term_to_cui {
+            if term.starts_with(&prefix) {
+                if let Some(node) = self.cui_to_node.get(cui) {
+                    return Some(CuiMatch {
+                        cui: cui.clone(),
+                        matched_term: term.clone(),
+                        terms: node.terms.clone(),
+                        semtypes: node.semtypes.clone(),
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
     /// Get all citations for a specific edge (source CUI, target CUI, predicate).
     /// If predicate is None, returns citations for all predicates between the pair.
     pub fn citations_for(
@@ -225,6 +272,50 @@ impl SuppKg {
             .get(cui)
             .map(|v| v.iter().map(|(t, p)| (t.as_str(), p.as_str())).collect())
             .unwrap_or_default()
+    }
+
+    /// Search all citation sentences for mentions of the given terms.
+    ///
+    /// Returns citations whose sentence text contains any of the search terms
+    /// (case-insensitive). Only returns citations with non-zero PMIDs (v1 data).
+    /// Results are deduplicated by PMID and sorted by confidence descending.
+    pub fn search_sentences(&self, search_terms: &[String]) -> Vec<SentenceMatch> {
+        let lower_terms: Vec<String> = search_terms.iter().map(|t| t.to_lowercase()).collect();
+        let mut seen_pmids = std::collections::HashSet::new();
+        let mut matches = Vec::new();
+
+        for ((_src_cui, _tgt_cui), edge_list) in &self.edges {
+            for edge in edge_list {
+                for citation in &edge.citations {
+                    // Skip v2 edgelist entries (no PMID)
+                    if citation.pmid == 0 {
+                        continue;
+                    }
+                    let sentence_lower = citation.sentence.to_lowercase();
+                    for term in &lower_terms {
+                        if sentence_lower.contains(term.as_str()) {
+                            // Dedup by PMID — keep first (highest confidence tends to come first)
+                            if seen_pmids.insert(citation.pmid) {
+                                matches.push(SentenceMatch {
+                                    source_cui: edge.source_cui.clone(),
+                                    target_cui: edge.target_cui.clone(),
+                                    predicate: edge.predicate.clone(),
+                                    pmid: citation.pmid,
+                                    sentence: citation.sentence.clone(),
+                                    confidence: citation.confidence,
+                                    matched_term: term.clone(),
+                                });
+                            }
+                            break; // Don't match multiple terms on the same citation
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by confidence descending
+        matches.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        matches
     }
 
     /// How many nodes are indexed.

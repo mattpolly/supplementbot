@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use event_log::events::PipelineEvent;
 use event_log::sink::EventSink;
 use graph_service::graph::KnowledgeGraph;
 use graph_service::merge::MergeStore;
+use graph_service::types::NodeType;
 use suppkg::SuppKg;
+use umls_client::{append_cache, load_cache, resolve_via_api, SupplementCui};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -23,6 +26,8 @@ pub struct SynonymResult {
     pub cuis_assigned: usize,
     /// How many alias pairs were detected (same CUI, different node name)
     pub aliases_found: usize,
+    /// How many CUIs were resolved via UMLS API (vs SuppKG term index)
+    pub umls_api_calls: usize,
 }
 
 /// Run synonym resolution: match graph nodes to SuppKG CUIs, detect and
@@ -30,18 +35,30 @@ pub struct SynonymResult {
 ///
 /// Algorithm:
 /// 1. For each node in the graph, try to resolve its name to a CUI via SuppKG
-/// 2. Record successful CUI mappings in the merge store
-/// 3. When two graph nodes share the same CUI, record an alias (the node
-///    with more edges becomes canonical)
+/// 2. If SuppKG fails and the node is an Ingredient, try the UMLS API
+/// 3. Record successful CUI mappings in the merge store + supplement_cuis.jsonl
+/// 4. When two graph nodes share the same CUI, record an alias
+///
+/// `umls_api_key` and `cache_path` are optional. When provided, Ingredient
+/// nodes that can't be resolved via SuppKG will be looked up via the UMLS API
+/// and cached to avoid repeat calls.
 pub async fn run_synonym_resolution(
     graph: &KnowledgeGraph,
     suppkg: &SuppKg,
     merge: &MergeStore,
     correlation_id: Uuid,
     sink: &dyn EventSink,
+    umls_api_key: Option<&str>,
+    cache_path: Option<&Path>,
 ) -> SynonymResult {
     let mut cuis_assigned = 0;
     let mut aliases_found = 0;
+    let mut umls_api_calls = 0;
+
+    // Load UMLS cache if path provided
+    let mut cache = cache_path
+        .map(|p| load_cache(p))
+        .unwrap_or_default();
 
     // Phase 1: Resolve CUIs for all graph nodes
     // Map from CUI → [(node_name, edge_count)]
@@ -53,33 +70,52 @@ pub async fn run_synonym_resolution(
             None => continue,
         };
 
-        // Skip if this node already has a CUI
-        if merge.cui_for(&data.name).await.is_some() {
-            // Still collect it for alias detection
-            if let Some(cui) = merge.cui_for(&data.name).await {
-                let edge_count = graph.outgoing_edges(&idx).await.len()
-                    + graph.incoming_edges(&idx).await.len();
-                cui_to_nodes
-                    .entry(cui)
-                    .or_default()
-                    .push((data.name.clone(), edge_count));
-            }
+        // Skip if this node already has a CUI — collect for alias detection
+        if let Some(cui) = merge.cui_for(&data.name).await {
+            let edge_count = graph.outgoing_edges(&idx).await.len()
+                + graph.incoming_edges(&idx).await.len();
+            cui_to_nodes
+                .entry(cui)
+                .or_default()
+                .push((data.name.clone(), edge_count));
             continue;
         }
 
-        // Try to resolve via SuppKG
+        // Try SuppKG exact match first
         if let Some(cui_match) = suppkg.resolve_cui(&data.name) {
             merge
                 .record_cui(&data.name, &cui_match.cui, 1.0, "exact_term")
                 .await;
             cuis_assigned += 1;
-
             let edge_count = graph.outgoing_edges(&idx).await.len()
                 + graph.incoming_edges(&idx).await.len();
             cui_to_nodes
                 .entry(cui_match.cui)
                 .or_default()
                 .push((data.name.clone(), edge_count));
+            continue;
+        }
+
+        // For Ingredient nodes: try UMLS API (with cache)
+        if data.node_type == NodeType::Ingredient {
+            if let Some(rec) = resolve_ingredient_cui(
+                &data.name,
+                umls_api_key,
+                cache_path,
+                &mut cache,
+                &mut umls_api_calls,
+            ).await {
+                merge
+                    .record_cui(&data.name, &rec.canonical_cui, 0.9, &rec.source)
+                    .await;
+                cuis_assigned += 1;
+                let edge_count = graph.outgoing_edges(&idx).await.len()
+                    + graph.incoming_edges(&idx).await.len();
+                cui_to_nodes
+                    .entry(rec.canonical_cui.clone())
+                    .or_default()
+                    .push((data.name.clone(), edge_count));
+            }
         }
     }
 
@@ -114,7 +150,47 @@ pub async fn run_synonym_resolution(
     SynonymResult {
         cuis_assigned,
         aliases_found,
+        umls_api_calls,
     }
+}
+
+// ---------------------------------------------------------------------------
+// UMLS resolution helper
+// ---------------------------------------------------------------------------
+
+/// Resolve an ingredient name to a UMLS CUI, using the cache first.
+/// If not cached and an API key is provided, calls the UMLS API and caches
+/// the result. Returns None if no API key or resolution fails.
+async fn resolve_ingredient_cui(
+    name: &str,
+    api_key: Option<&str>,
+    cache_path: Option<&Path>,
+    cache: &mut HashMap<String, SupplementCui>,
+    api_call_count: &mut usize,
+) -> Option<SupplementCui> {
+    let key = name.to_lowercase();
+
+    // Cache hit
+    if let Some(rec) = cache.get(&key) {
+        return Some(rec.clone());
+    }
+
+    // Need API key to go further
+    let api_key = api_key?;
+
+    eprintln!("[umls] resolving '{}' via API...", name);
+    let rec = resolve_via_api(name, api_key).await?;
+    *api_call_count += 1;
+
+    // Store in cache file
+    if let Some(path) = cache_path {
+        if let Err(e) = append_cache(path, &rec) {
+            eprintln!("[umls] failed to write cache: {}", e);
+        }
+    }
+
+    cache.insert(key, rec.clone());
+    Some(rec)
 }
 
 // ---------------------------------------------------------------------------
@@ -160,7 +236,7 @@ mod tests {
 
         let corr_id = Uuid::new_v4();
         let result =
-            run_synonym_resolution(&graph, &suppkg, &merge, corr_id, &sink).await;
+            run_synonym_resolution(&graph, &suppkg, &merge, corr_id, &sink, None, None).await;
 
         assert_eq!(result.cuis_assigned, 2);
         assert_eq!(
@@ -202,7 +278,7 @@ mod tests {
 
         let corr_id = Uuid::new_v4();
         let result =
-            run_synonym_resolution(&graph, &suppkg, &merge, corr_id, &sink).await;
+            run_synonym_resolution(&graph, &suppkg, &merge, corr_id, &sink, None, None).await;
 
         assert!(result.aliases_found >= 1, "should detect alias from shared CUI");
 
@@ -227,7 +303,7 @@ mod tests {
 
         let corr_id = Uuid::new_v4();
         let result =
-            run_synonym_resolution(&graph, &suppkg, &merge, corr_id, &sink).await;
+            run_synonym_resolution(&graph, &suppkg, &merge, corr_id, &sink, None, None).await;
 
         // Only magnesium should match; "atp synthesis" isn't in our test SuppKG
         assert_eq!(result.cuis_assigned, 1);
@@ -246,7 +322,7 @@ mod tests {
             .await;
 
         let corr_id = Uuid::new_v4();
-        run_synonym_resolution(&graph, &suppkg, &merge, corr_id, &sink).await;
+        run_synonym_resolution(&graph, &suppkg, &merge, corr_id, &sink, None, None).await;
 
         let events = sink.events_for(corr_id);
         let has_synonym = events
