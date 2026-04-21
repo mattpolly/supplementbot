@@ -126,17 +126,23 @@ pub async fn run_citation_backing_with_registry(
         // Collect for batch sentence search
         let search_terms = registry.search_terms_for(&ingredient_name).await;
         if !search_terms.is_empty() {
+            eprintln!("  [sentence-search] {} → terms: {:?}", ingredient_name, search_terms);
             sentence_search_ingredients.insert(ingredient_name, search_terms);
+        } else {
+            eprintln!("  [sentence-search] {} → NO search terms in registry", ingredient_name);
         }
     }
 
     // Phase 2: Single-pass batch sentence search for all remaining ingredients.
     // 5 citations per (ingredient, target_cui) pair for breadth across use cases.
     if !sentence_search_ingredients.is_empty() {
+        eprintln!("  [sentence-search] batch scanning {} ingredients...", sentence_search_ingredients.len());
         let batch_results =
             suppkg.search_sentences_batch(&sentence_search_ingredients, 5);
+        eprintln!("  [sentence-search] batch returned {} ingredients with matches", batch_results.len());
 
         for (ingredient_name, matches) in &batch_results {
+            eprintln!("  [sentence-search] {} → {} matches", ingredient_name, matches.len());
             let stored = store_sentence_matches(
                 ingredient_name, matches, suppkg, source_store, &mut sample,
             ).await;
