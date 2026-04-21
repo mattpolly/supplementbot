@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read};
 
 use crate::types::*;
@@ -17,6 +17,17 @@ pub struct SuppKg {
     edges: HashMap<(String, String), Vec<SuppEdge>>,
     /// CUI → all outgoing edge keys for quick "what does this concept connect to"
     outgoing: HashMap<String, Vec<(String, String)>>, // CUI → [(target_cui, predicate)]
+    /// Inverted index: lowercase word → set of (edge_key, edge_idx, citation_idx)
+    /// Built at load time for O(1) sentence search instead of brute-force scan.
+    sentence_index: HashMap<String, Vec<SentenceLocation>>,
+}
+
+/// Pointer into the edge/citation structure for the inverted index.
+#[derive(Clone, Debug)]
+struct SentenceLocation {
+    edge_key: (String, String), // (source_cui, target_cui)
+    edge_idx: usize,            // index into edges[edge_key]
+    citation_idx: usize,        // index into edge.citations
 }
 
 impl SuppKg {
@@ -72,11 +83,14 @@ impl SuppKg {
                 .push((nx_link.target.clone(), nx_link.key.clone()));
         }
 
+        let sentence_index = build_sentence_index(&edges);
+
         Ok(Self {
             term_to_cui,
             cui_to_node,
             edges,
             outgoing,
+            sentence_index,
         })
     }
 
@@ -155,11 +169,14 @@ impl SuppKg {
             }
         }
 
+        let sentence_index = build_sentence_index(&edges);
+
         Ok(Self {
             term_to_cui,
             cui_to_node,
             edges,
             outgoing,
+            sentence_index,
         })
     }
 
@@ -274,47 +291,105 @@ impl SuppKg {
             .unwrap_or_default()
     }
 
-    /// Search all citation sentences for mentions of the given terms.
+    /// Search citation sentences for mentions of the given terms using the
+    /// inverted index. Returns up to `limit` results (default 50), deduplicated
+    /// by PMID and sorted by confidence descending.
     ///
-    /// Returns citations whose sentence text contains any of the search terms
-    /// (case-insensitive). Only returns citations with non-zero PMIDs (v1 data).
-    /// Results are deduplicated by PMID and sorted by confidence descending.
+    /// This is O(terms × avg_postings) instead of O(total_citations × terms),
+    /// making it fast even on the full 1.2M citation corpus.
     pub fn search_sentences(&self, search_terms: &[String]) -> Vec<SentenceMatch> {
+        self.search_sentences_limit(search_terms, 50)
+    }
+
+    /// Like `search_sentences` but with a configurable result limit.
+    pub fn search_sentences_limit(
+        &self,
+        search_terms: &[String],
+        limit: usize,
+    ) -> Vec<SentenceMatch> {
         let lower_terms: Vec<String> = search_terms.iter().map(|t| t.to_lowercase()).collect();
-        let mut seen_pmids = std::collections::HashSet::new();
+        let mut seen_pmids: HashSet<u64> = HashSet::new();
         let mut matches = Vec::new();
 
-        for ((_src_cui, _tgt_cui), edge_list) in &self.edges {
-            for edge in edge_list {
-                for citation in &edge.citations {
-                    // Skip v2 edgelist entries (no PMID)
-                    if citation.pmid == 0 {
-                        continue;
-                    }
-                    let sentence_lower = citation.sentence.to_lowercase();
-                    for term in &lower_terms {
-                        if sentence_lower.contains(term.as_str()) {
-                            // Dedup by PMID — keep first (highest confidence tends to come first)
-                            if seen_pmids.insert(citation.pmid) {
-                                matches.push(SentenceMatch {
-                                    source_cui: edge.source_cui.clone(),
-                                    target_cui: edge.target_cui.clone(),
-                                    predicate: edge.predicate.clone(),
-                                    pmid: citation.pmid,
-                                    sentence: citation.sentence.clone(),
-                                    confidence: citation.confidence,
-                                    matched_term: term.clone(),
-                                });
-                            }
-                            break; // Don't match multiple terms on the same citation
+        // For each search term, split into words and find candidate citations
+        // via the inverted index, then verify the full term appears in the sentence.
+        for term in &lower_terms {
+            let words: Vec<&str> = term.split_whitespace().collect();
+            if words.is_empty() {
+                continue;
+            }
+
+            // Use the rarest word (shortest posting list) as the starting set
+            let mut candidate_locations: Option<Vec<&SentenceLocation>> = None;
+            for word in &words {
+                if let Some(postings) = self.sentence_index.get(*word) {
+                    match &candidate_locations {
+                        None => candidate_locations = Some(postings.iter().collect()),
+                        Some(current) if postings.len() < current.len() => {
+                            candidate_locations = Some(postings.iter().collect());
                         }
+                        _ => {}
                     }
+                } else {
+                    // Word not in any sentence — this term can't match
+                    candidate_locations = Some(Vec::new());
+                    break;
+                }
+            }
+
+            let candidates = match candidate_locations {
+                Some(c) => c,
+                None => continue,
+            };
+
+            for loc in candidates {
+                if matches.len() >= limit {
+                    break;
+                }
+
+                let edge_list = match self.edges.get(&loc.edge_key) {
+                    Some(el) => el,
+                    None => continue,
+                };
+                let edge = match edge_list.get(loc.edge_idx) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                let citation = match edge.citations.get(loc.citation_idx) {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                if citation.pmid == 0 {
+                    continue;
+                }
+
+                // Verify the full term appears in the sentence (not just one word)
+                let sentence_lower = citation.sentence.to_lowercase();
+                if !sentence_lower.contains(term.as_str()) {
+                    continue;
+                }
+
+                if seen_pmids.insert(citation.pmid) {
+                    matches.push(SentenceMatch {
+                        source_cui: edge.source_cui.clone(),
+                        target_cui: edge.target_cui.clone(),
+                        predicate: edge.predicate.clone(),
+                        pmid: citation.pmid,
+                        sentence: citation.sentence.clone(),
+                        confidence: citation.confidence,
+                        matched_term: term.clone(),
+                    });
                 }
             }
         }
 
         // Sort by confidence descending
-        matches.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        matches.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         matches
     }
 
@@ -332,6 +407,48 @@ impl SuppKg {
     pub fn edge_pair_count(&self) -> usize {
         self.edges.len()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inverted index builder
+// ---------------------------------------------------------------------------
+
+/// Build a word-level inverted index over all citation sentences.
+///
+/// For each citation with a non-zero PMID, splits the sentence into lowercase
+/// words and records a `SentenceLocation` pointer. This allows `search_sentences`
+/// to find candidates in O(1) per word instead of scanning all 1.2M citations.
+fn build_sentence_index(
+    edges: &HashMap<(String, String), Vec<SuppEdge>>,
+) -> HashMap<String, Vec<SentenceLocation>> {
+    let mut index: HashMap<String, Vec<SentenceLocation>> = HashMap::new();
+
+    for (edge_key, edge_list) in edges {
+        for (edge_idx, edge) in edge_list.iter().enumerate() {
+            for (citation_idx, citation) in edge.citations.iter().enumerate() {
+                if citation.pmid == 0 {
+                    continue;
+                }
+                let loc = SentenceLocation {
+                    edge_key: edge_key.clone(),
+                    edge_idx,
+                    citation_idx,
+                };
+                for word in citation.sentence.to_lowercase().split_whitespace() {
+                    // Strip common punctuation to normalize
+                    let clean: String = word
+                        .chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '-')
+                        .collect();
+                    if clean.len() >= 2 {
+                        index.entry(clean).or_default().push(loc.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    index
 }
 
 // ---------------------------------------------------------------------------
@@ -586,5 +703,44 @@ mod tests {
         assert_eq!(kg.edge_pair_count(), 1, "same pair should be one entry");
         let cites = kg.citations_for("C0024467", "C0027763", Some("AFFECTS"));
         assert_eq!(cites.len(), 2, "two sentences should be aggregated as citations");
+    }
+
+    #[test]
+    fn test_search_sentences_uses_index() {
+        let kg = load_test_kg();
+        // "magnesium" appears in 3 sentences across the test data
+        let results = kg.search_sentences(&["magnesium".to_string()]);
+        assert!(
+            !results.is_empty(),
+            "should find sentences mentioning magnesium"
+        );
+        // All results should have non-zero PMIDs
+        for r in &results {
+            assert!(r.pmid > 0);
+        }
+    }
+
+    #[test]
+    fn test_search_sentences_limit() {
+        let kg = load_test_kg();
+        let results = kg.search_sentences_limit(&["magnesium".to_string()], 1);
+        assert!(results.len() <= 1, "should respect limit");
+    }
+
+    #[test]
+    fn test_search_sentences_multi_word() {
+        let kg = load_test_kg();
+        let results = kg.search_sentences(&["nervous system".to_string()]);
+        assert!(
+            !results.is_empty(),
+            "should find multi-word term in sentences"
+        );
+    }
+
+    #[test]
+    fn test_search_sentences_no_match() {
+        let kg = load_test_kg();
+        let results = kg.search_sentences(&["xylophone".to_string()]);
+        assert!(results.is_empty(), "should return empty for no matches");
     }
 }

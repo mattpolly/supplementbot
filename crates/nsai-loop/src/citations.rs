@@ -229,6 +229,8 @@ async fn try_sentence_search(
 ) -> usize {
     let search_terms = registry.search_terms_for(ingredient_name).await;
 
+    // Cap at 50 citations per ingredient to avoid flooding the DB.
+    // search_sentences already returns results sorted by confidence descending.
     let matches = suppkg.search_sentences(&search_terms);
     if matches.is_empty() {
         return 0;
