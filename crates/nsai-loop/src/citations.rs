@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use event_log::events::{CitationRef, PipelineEvent};
 use event_log::sink::EventSink;
 use graph_service::graph::KnowledgeGraph;
@@ -96,6 +98,10 @@ pub async fn run_citation_backing_with_registry(
     let mut sentence_resolved = 0;
     let mut sample: Vec<CitationRef> = Vec::new();
 
+    // Phase 1: Try CUI-based resolution for each ingredient.
+    // Collect ingredients that fail CUI resolution for batch sentence search.
+    let mut sentence_search_ingredients: HashMap<String, Vec<String>> = HashMap::new();
+
     for idx in &ingredient_nodes {
         let node_data = match graph.node_data(idx).await {
             Some(d) => d,
@@ -117,15 +123,28 @@ pub async fn run_citation_backing_with_registry(
             continue;
         }
 
-        // Strategy 2: Sentence search fallback
-        let sentence_citations = try_sentence_search(
-            &ingredient_name, suppkg, registry, source_store, &mut sample,
-        ).await;
+        // Collect for batch sentence search
+        let search_terms = registry.search_terms_for(&ingredient_name).await;
+        if !search_terms.is_empty() {
+            sentence_search_ingredients.insert(ingredient_name, search_terms);
+        }
+    }
 
-        if sentence_citations > 0 {
-            citations_stored += sentence_citations;
-            edges_backed += 1;
-            sentence_resolved += 1;
+    // Phase 2: Single-pass batch sentence search for all remaining ingredients.
+    // 5 citations per (ingredient, target_cui) pair for breadth across use cases.
+    if !sentence_search_ingredients.is_empty() {
+        let batch_results =
+            suppkg.search_sentences_batch(&sentence_search_ingredients, 5);
+
+        for (ingredient_name, matches) in &batch_results {
+            let stored = store_sentence_matches(
+                ingredient_name, matches, suppkg, source_store, &mut sample,
+            ).await;
+            if stored > 0 {
+                citations_stored += stored;
+                edges_backed += 1;
+                sentence_resolved += 1;
+            }
         }
     }
 
@@ -218,29 +237,19 @@ async fn try_cui_based(
     stored
 }
 
-/// Try to find citations by searching SuppKG sentence text for ingredient names.
-/// Returns the number of citations stored (0 if no sentences matched).
-async fn try_sentence_search(
+/// Store sentence search matches for a single ingredient.
+/// Returns the number of citations stored.
+async fn store_sentence_matches(
     ingredient_name: &str,
+    matches: &[suppkg::SentenceMatch],
     suppkg: &SuppKg,
-    registry: &IngredientRegistry,
     source_store: &SourceStore,
     sample: &mut Vec<CitationRef>,
 ) -> usize {
-    let search_terms = registry.search_terms_for(ingredient_name).await;
-
-    // Cap at 50 citations per ingredient to avoid flooding the DB.
-    // search_sentences already returns results sorted by confidence descending.
-    let matches = suppkg.search_sentences(&search_terms);
-    if matches.is_empty() {
-        return 0;
-    }
-
     let mut stored = 0;
-    let target_term_for = |cui: &str| suppkg.first_term_for(cui).to_string();
 
-    for m in &matches {
-        let target_term = target_term_for(&m.target_cui);
+    for m in matches {
+        let target_term = suppkg.first_term_for(&m.target_cui).to_string();
         let record = CitationRecord {
             source_node: ingredient_name.to_string(),
             target_node: target_term.clone(),

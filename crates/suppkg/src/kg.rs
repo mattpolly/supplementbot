@@ -17,17 +17,6 @@ pub struct SuppKg {
     edges: HashMap<(String, String), Vec<SuppEdge>>,
     /// CUI → all outgoing edge keys for quick "what does this concept connect to"
     outgoing: HashMap<String, Vec<(String, String)>>, // CUI → [(target_cui, predicate)]
-    /// Inverted index: lowercase word → set of (edge_key, edge_idx, citation_idx)
-    /// Built at load time for O(1) sentence search instead of brute-force scan.
-    sentence_index: HashMap<String, Vec<SentenceLocation>>,
-}
-
-/// Pointer into the edge/citation structure for the inverted index.
-#[derive(Clone, Debug)]
-struct SentenceLocation {
-    edge_key: (String, String), // (source_cui, target_cui)
-    edge_idx: usize,            // index into edges[edge_key]
-    citation_idx: usize,        // index into edge.citations
 }
 
 impl SuppKg {
@@ -83,14 +72,11 @@ impl SuppKg {
                 .push((nx_link.target.clone(), nx_link.key.clone()));
         }
 
-        let sentence_index = build_sentence_index(&edges);
-
         Ok(Self {
             term_to_cui,
             cui_to_node,
             edges,
             outgoing,
-            sentence_index,
         })
     }
 
@@ -169,14 +155,11 @@ impl SuppKg {
             }
         }
 
-        let sentence_index = build_sentence_index(&edges);
-
         Ok(Self {
             term_to_cui,
             cui_to_node,
             edges,
             outgoing,
-            sentence_index,
         })
     }
 
@@ -291,106 +274,97 @@ impl SuppKg {
             .unwrap_or_default()
     }
 
-    /// Search citation sentences for mentions of the given terms using the
-    /// inverted index. Returns up to `limit` results (default 50), deduplicated
-    /// by PMID and sorted by confidence descending.
+    /// Search citation sentences for mentions of the given terms.
     ///
-    /// This is O(terms × avg_postings) instead of O(total_citations × terms),
-    /// making it fast even on the full 1.2M citation corpus.
+    /// Linear scan with early exit after 50 results per (ingredient, target_cui).
+    /// Results are deduplicated by PMID and sorted by confidence descending.
     pub fn search_sentences(&self, search_terms: &[String]) -> Vec<SentenceMatch> {
-        self.search_sentences_limit(search_terms, 50)
+        // Delegate to batch with a single anonymous ingredient, cap 5 per target
+        let mut ingredients = HashMap::new();
+        ingredients.insert("_".to_string(), search_terms.to_vec());
+        let mut results = self.search_sentences_batch(&ingredients, 5);
+        results.remove("_").unwrap_or_default()
     }
 
-    /// Like `search_sentences` but with a configurable result limit.
-    pub fn search_sentences_limit(
+    /// Batch sentence search: single pass over all citations, matching against
+    /// multiple ingredients at once.
+    ///
+    /// `ingredients` maps ingredient_name → search_terms.
+    /// `per_target_cap` limits how many citations to keep per (ingredient, target_cui).
+    ///
+    /// Returns ingredient_name → Vec<SentenceMatch>, sorted by confidence.
+    pub fn search_sentences_batch(
         &self,
-        search_terms: &[String],
-        limit: usize,
-    ) -> Vec<SentenceMatch> {
-        let lower_terms: Vec<String> = search_terms.iter().map(|t| t.to_lowercase()).collect();
-        let mut seen_pmids: HashSet<u64> = HashSet::new();
-        let mut matches = Vec::new();
-
-        // For each search term, split into words and find candidate citations
-        // via the inverted index, then verify the full term appears in the sentence.
-        for term in &lower_terms {
-            let words: Vec<&str> = term.split_whitespace().collect();
-            if words.is_empty() {
-                continue;
+        ingredients: &HashMap<String, Vec<String>>,
+        per_target_cap: usize,
+    ) -> HashMap<String, Vec<SentenceMatch>> {
+        // Pre-lowercase all search terms, map each term back to its ingredient
+        let mut term_to_ingredient: Vec<(String, String)> = Vec::new(); // (lower_term, ingredient_name)
+        for (ingredient, terms) in ingredients {
+            for term in terms {
+                term_to_ingredient.push((term.to_lowercase(), ingredient.clone()));
             }
+        }
 
-            // Use the rarest word (shortest posting list) as the starting set
-            let mut candidate_locations: Option<Vec<&SentenceLocation>> = None;
-            for word in &words {
-                if let Some(postings) = self.sentence_index.get(*word) {
-                    match &candidate_locations {
-                        None => candidate_locations = Some(postings.iter().collect()),
-                        Some(current) if postings.len() < current.len() => {
-                            candidate_locations = Some(postings.iter().collect());
-                        }
-                        _ => {}
+        // Per-ingredient state: seen PMIDs + per-target counts
+        let mut seen_pmids: HashMap<String, HashSet<u64>> = HashMap::new();
+        // (ingredient, target_cui) → count
+        let mut target_counts: HashMap<(String, String), usize> = HashMap::new();
+        let mut results: HashMap<String, Vec<SentenceMatch>> = HashMap::new();
+
+        for edge_list in self.edges.values() {
+            for edge in edge_list {
+                for citation in &edge.citations {
+                    if citation.pmid == 0 {
+                        continue;
                     }
-                } else {
-                    // Word not in any sentence — this term can't match
-                    candidate_locations = Some(Vec::new());
-                    break;
-                }
-            }
+                    let sentence_lower = citation.sentence.to_lowercase();
 
-            let candidates = match candidate_locations {
-                Some(c) => c,
-                None => continue,
-            };
+                    for (term, ingredient) in &term_to_ingredient {
+                        if !sentence_lower.contains(term.as_str()) {
+                            continue;
+                        }
 
-            for loc in candidates {
-                if matches.len() >= limit {
-                    break;
-                }
+                        // Check per-target cap
+                        let target_key = (ingredient.clone(), edge.target_cui.clone());
+                        let count = target_counts.entry(target_key).or_insert(0);
+                        if *count >= per_target_cap {
+                            continue;
+                        }
 
-                let edge_list = match self.edges.get(&loc.edge_key) {
-                    Some(el) => el,
-                    None => continue,
-                };
-                let edge = match edge_list.get(loc.edge_idx) {
-                    Some(e) => e,
-                    None => continue,
-                };
-                let citation = match edge.citations.get(loc.citation_idx) {
-                    Some(c) => c,
-                    None => continue,
-                };
+                        // Dedup by PMID per ingredient
+                        let pmids = seen_pmids.entry(ingredient.clone()).or_default();
+                        if !pmids.insert(citation.pmid) {
+                            continue;
+                        }
 
-                if citation.pmid == 0 {
-                    continue;
-                }
-
-                // Verify the full term appears in the sentence (not just one word)
-                let sentence_lower = citation.sentence.to_lowercase();
-                if !sentence_lower.contains(term.as_str()) {
-                    continue;
-                }
-
-                if seen_pmids.insert(citation.pmid) {
-                    matches.push(SentenceMatch {
-                        source_cui: edge.source_cui.clone(),
-                        target_cui: edge.target_cui.clone(),
-                        predicate: edge.predicate.clone(),
-                        pmid: citation.pmid,
-                        sentence: citation.sentence.clone(),
-                        confidence: citation.confidence,
-                        matched_term: term.clone(),
-                    });
+                        *count += 1;
+                        results.entry(ingredient.clone()).or_default().push(
+                            SentenceMatch {
+                                source_cui: edge.source_cui.clone(),
+                                target_cui: edge.target_cui.clone(),
+                                predicate: edge.predicate.clone(),
+                                pmid: citation.pmid,
+                                sentence: citation.sentence.clone(),
+                                confidence: citation.confidence,
+                                matched_term: term.clone(),
+                            },
+                        );
+                    }
                 }
             }
         }
 
-        // Sort by confidence descending
-        matches.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        matches
+        // Sort each ingredient's results by confidence descending
+        for matches in results.values_mut() {
+            matches.sort_by(|a, b| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        results
     }
 
     /// How many nodes are indexed.
@@ -407,48 +381,6 @@ impl SuppKg {
     pub fn edge_pair_count(&self) -> usize {
         self.edges.len()
     }
-}
-
-// ---------------------------------------------------------------------------
-// Inverted index builder
-// ---------------------------------------------------------------------------
-
-/// Build a word-level inverted index over all citation sentences.
-///
-/// For each citation with a non-zero PMID, splits the sentence into lowercase
-/// words and records a `SentenceLocation` pointer. This allows `search_sentences`
-/// to find candidates in O(1) per word instead of scanning all 1.2M citations.
-fn build_sentence_index(
-    edges: &HashMap<(String, String), Vec<SuppEdge>>,
-) -> HashMap<String, Vec<SentenceLocation>> {
-    let mut index: HashMap<String, Vec<SentenceLocation>> = HashMap::new();
-
-    for (edge_key, edge_list) in edges {
-        for (edge_idx, edge) in edge_list.iter().enumerate() {
-            for (citation_idx, citation) in edge.citations.iter().enumerate() {
-                if citation.pmid == 0 {
-                    continue;
-                }
-                let loc = SentenceLocation {
-                    edge_key: edge_key.clone(),
-                    edge_idx,
-                    citation_idx,
-                };
-                for word in citation.sentence.to_lowercase().split_whitespace() {
-                    // Strip common punctuation to normalize
-                    let clean: String = word
-                        .chars()
-                        .filter(|c| c.is_alphanumeric() || *c == '-')
-                        .collect();
-                    if clean.len() >= 2 {
-                        index.entry(clean).or_default().push(loc.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    index
 }
 
 // ---------------------------------------------------------------------------
@@ -721,10 +653,22 @@ mod tests {
     }
 
     #[test]
-    fn test_search_sentences_limit() {
+    fn test_search_sentences_batch_per_target_cap() {
         let kg = load_test_kg();
-        let results = kg.search_sentences_limit(&["magnesium".to_string()], 1);
-        assert!(results.len() <= 1, "should respect limit");
+        let mut ingredients = HashMap::new();
+        ingredients.insert("mag".to_string(), vec!["magnesium".to_string()]);
+        // Cap 1 per target — magnesium has 2 targets so should get at most 2 results
+        let results = kg.search_sentences_batch(&ingredients, 1);
+        let mag = results.get("mag").unwrap();
+        assert!(!mag.is_empty(), "should find matches");
+        // Count per target_cui — each should have at most 1
+        let mut target_counts: HashMap<&str, usize> = HashMap::new();
+        for m in mag {
+            *target_counts.entry(&m.target_cui).or_insert(0) += 1;
+        }
+        for (_cui, count) in &target_counts {
+            assert!(*count <= 1, "should cap at 1 per target");
+        }
     }
 
     #[test]
