@@ -34,7 +34,7 @@ async fn main() {
     let db_user = std::env::var("DB_USER").unwrap_or_else(|_| "root".to_string());
     let db_pass = std::env::var("DB_PASS").expect("DB_PASS must be set");
     let static_dir = std::env::var("STATIC_DIR")
-        .unwrap_or_else(|_| "/home/mpolly/supplementbot.com".to_string());
+        .expect("STATIC_DIR must be set (path to static site files)");
     let max_concurrent: usize = std::env::var("MAX_CONCURRENT_SESSIONS")
         .ok()
         .and_then(|v| v.parse().ok())

@@ -174,17 +174,48 @@ citation numbers, we could extract real PMIDs. This is indirect and fragile.
 
 ---
 
-## Open Questions for External Research
+## Resolution (2026-04-21)
 
-1. Is there a current (non-deprecated) biomedical knowledge graph that:
-   - Has UMLS `C*` CUI-identified nodes for common dietary supplements
-   - Carries PubMed PMIDs on its edges
-   - Covers consumer supplement names like ashwagandha, rhodiola rosea, probiotics?
+**Status: SOLVED.** All 19 ingredients now have PubMed-backed citations. 22,952 total citations stored.
 
-2. Does PKG 2.0 or any successor to SemMedDB provide downloadable RDF/JSON with PMID citations?
+### Root Cause
 
-3. Does the iDISK 2.0 GitHub repository include the source bibliographies that the embedded
-   reference numbers in DSI.csv point to?
+`load_with_edgelist()` in `crates/suppkg/src/kg.rs` was discarding v1 JSON edges (which carry PMIDs and confidence scores) and replacing them with v2 edgelist edges (which have pmid=0). Sentence search filters out pmid=0 entries, so it could never find anything when the CLI loaded SuppKG via `load_with_edgelist`.
 
-4. Is there a PubMed-derived supplement-specific citation database (like what MSKCC uses
-   internally) that is publicly downloadable?
+### What Worked: Two-Phase Citation Resolution
+
+**Phase 1 — CUI-based resolution** (8 ingredients): For ingredients with known SuppKG CUIs (via hardcoded overrides or merge store), directly look up all edges for that CUI and store their citations.
+
+**Phase 2 — Batch sentence search** (11 ingredients): For remaining ingredients, scan all 1.2M SuppKG citation sentences in a single pass, checking each sentence against all ingredient search terms simultaneously. This recovers citations even when CUI namespaces don't match.
+
+### Key Implementation Details
+
+- **`load_with_edgelist` fix**: Load v1 JSON edges first (with PMIDs), then merge v2 edgelist edges on top, instead of replacing.
+- **Per-target cap**: 5 citations per (ingredient, target_cui) pair ensures breadth across use cases (e.g., vitamin C gets citations for both skin health and immune function, not just the first 50 matches).
+- **Batch DB dedup**: `record_citations_batch()` fetches all existing PMIDs for an ingredient in one query, deduplicates in-memory, then inserts only new ones. Replaced per-citation SELECT+INSERT round-trips.
+- **Found vs. stored separation**: `try_cui_based()` returns `(found, stored)` tuple so re-runs correctly detect that CUI resolution succeeded even when all citations were already stored.
+- **Ingredient registry**: `IngredientRegistry` in `crates/graph-service/src/registry.rs` provides curated search terms (from iDISK and CTD) for all 19 ingredients, including synonyms and pharmaceutical names.
+
+### Final Numbers
+
+| Resolution Method | Ingredients | Citations Stored |
+|---|---|---|
+| CUI-based | 8 | ~700 |
+| Sentence search | 11 | ~22,200 |
+| **Total** | **19/19** | **22,952** |
+
+### Performance
+
+Initial naive implementation took 10+ minutes with 960k junk rows and caused swap thrashing on the 8GB production server. Final implementation runs in seconds via:
+- Single-pass batch sentence search (not per-ingredient scans)
+- Per-target caps (not flat 50-per-ingredient cap)
+- Batch DB dedup (1 query per ingredient, not per citation)
+- Removed inverted index attempt (too memory-hungry for 8GB server)
+
+### Remaining Open Questions
+
+These are no longer blockers but remain relevant for future expansion:
+
+1. Is there a current biomedical KG with standard UMLS CUIs and PubMed citations for supplements?
+2. Can CTD disease-level PMIDs be reframed into mechanism-level citations via LLM extraction?
+3. Can PubMed E-utilities provide fresh citations beyond what SuppKG covers?

@@ -85,7 +85,7 @@ The graph owns topology; a parallel relational layer in SurrealDB (same embedded
 **Tables:**
 - **`node_source`** — one row per observation of a node: which provider, which model, when, correlation ID
 - **`edge_source`** — one row per observation of an edge: provider, model, timestamp, confidence, source tag (Extracted/StructurallyEmergent/Deduced/Confirmed), observation type (created/confirmed)
-- **`citations`** (future) — PubMed references supporting specific edge source rows
+- **`edge_citation`** (Built — 2026-04-21) — PubMed references (PMID, sentence, confidence) keyed by ingredient name, 22,952 citations across 19 ingredients
 
 **Query capabilities (built):**
 - `observations_for_edge(src, tgt, type)` — full history for any edge
@@ -97,7 +97,7 @@ The graph owns topology; a parallel relational layer in SurrealDB (same embedded
 
 **Portability:** The JSONL event log remains the portable source of truth. The SurrealDB source tables are materialized projections — disposable, rebuildable from the event log. If SurrealDB doesn't scale, we replay the event log into a new backend.
 
-**Framing:** The current graph is a **speculative KG** — built from LLM extraction with no external validation. When edges are confirmed via PubMed, external KGs (NP-KG, SuppKG), or clinical data, they graduate to a future **proven KG**. The source tables enable this distinction: edges with only LLM observations are speculative; edges with literature citations are proven.
+**Framing:** The graph started as a **speculative KG** — built from LLM extraction with no external validation. As of 2026-04-21, edges for all 19 ingredients are backed by PubMed citations from SuppKG (22,952 citations total). Edges with only LLM observations remain speculative; edges with literature citations in `edge_citation` are citation-backed. The source tables enable this distinction and the `CitationBacked` quality tier is now operational.
 
 Graph confidence becomes a computed aggregate over source rows rather than a one-time assignment. Two providers independently extracting the same edge is stronger evidence than one — this is the path to real cross-provider validation.
 
@@ -113,7 +113,7 @@ Graph confidence becomes a computed aggregate over source rows rather than a one
 | `Speculative` | Only `StructurallyEmergent` source tags from a single LLM | Topology-driven observation validated by one provider |
 | `SingleProvider` | `Extracted` by exactly one LLM provider | Anthropic extracted `magnesium → acts_on → nervous system` |
 | `MultiProvider` | `Extracted` by 2+ independent providers | Both Anthropic and Gemini extracted the same edge |
-| `CitationBacked` | (future) Confirmed by PubMed or external KG | Edge has a literature citation in the `citations` table |
+| `CitationBacked` | (Built — 2026-04-21) Confirmed by PubMed via SuppKG | Edge has a literature citation in the `edge_citation` table |
 
 **Query API:**
 - `edges_by_quality()` — classify all edges by tier
@@ -456,18 +456,18 @@ Rather than depending on any single external KG, we build our own ingredient kno
 
 ### Implementation Plan
 
-**Phase 1: Sentence-based SuppKG mining (immediate)**
-- Replace CUI-based lookup in `run_citation_backing()` with sentence text search
-- For each ingredient, search all SuppKG sentences for the ingredient name + known synonyms
-- Store matches in `edge_citation` keyed by ingredient name (existing schema works as-is)
-- This unblocks citations for all current ingredients with zero new infrastructure
+**Phase 1: Sentence-based SuppKG mining (COMPLETE — 2026-04-21)**
+- Two-phase resolution: CUI-based for 8 ingredients, batch sentence search for remaining 11
+- Single-pass scan of 1.2M citations with per-target cap (5 per ingredient×target_cui pair)
+- Batch DB dedup via `record_citations_batch()` — 1 query per ingredient instead of per citation
+- Fixed `load_with_edgelist` to preserve v1 JSON edges (with PMIDs) when merging v2 edgelist
+- Result: 22,952 citations across all 19 ingredients
 
-**Phase 2: Ingredient registry with multi-source IDs**
-- Build an ingredient registry table storing name, synonyms, and all external IDs per ingredient
-- Populate from iDISK 2.0 DSI.csv (7,876 ingredients with UMLS CUIs, common names, metadata)
-- Enrich with CTD MeSH IDs from CTD_chemicals.csv (already downloaded)
-- Enrich with modern UMLS CUIs from supplement_cuis.jsonl / UMLS API
-- This becomes the canonical ingredient vocabulary for the system
+**Phase 2: Ingredient registry with multi-source IDs (COMPLETE — 2026-04-21)**
+- `IngredientRegistry` in `crates/graph-service/src/registry.rs` with curated search terms
+- 19 ingredients hydrated with synonyms from iDISK and CTD
+- Provides `search_terms_for()` returning curated terms or fallback to name+synonyms
+- Used by both CUI resolution and sentence search phases
 
 **Phase 3: CTD integration**
 - Use CTD's curated chemical-disease file for additional PMIDs per ingredient
