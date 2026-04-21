@@ -137,6 +137,9 @@ pub async fn run_citation_backing_with_registry(
             suppkg.search_sentences_batch(&sentence_search_ingredients, 5);
 
         for (ingredient_name, matches) in &batch_results {
+        }
+
+        for (ingredient_name, matches) in &batch_results {
             let stored = store_sentence_matches(
                 ingredient_name, matches, suppkg, source_store, &mut sample,
             ).await;

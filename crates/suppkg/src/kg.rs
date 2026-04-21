@@ -88,41 +88,20 @@ impl SuppKg {
         Self::from_reader(reader)
     }
 
-    /// Load nodes from the JSON, then replace edges with the v2 edgelist.
+    /// Load nodes and edges from the JSON, then merge in v2 edgelist edges.
     ///
-    /// The JSON provides node metadata (CUI → terms, semtypes).
-    /// The edgelist provides the updated, larger edge set (1.3M edges).
-    /// Edges from the JSON are discarded — the edgelist supersedes them.
+    /// The JSON provides node metadata (CUI → terms, semtypes) and v1 edges
+    /// with PMIDs and confidence scores. The v2 edgelist adds ~700K more edges
+    /// but without PMIDs. Both are kept: v1 edges are needed for citation
+    /// sentence search (which requires PMIDs), while v2 edges extend the graph.
     pub fn load_with_edgelist(json_path: &str, edgelist_path: &str) -> Result<Self, String> {
-        // Load nodes from JSON
-        let file = std::fs::File::open(json_path)
-            .map_err(|e| format!("Failed to open {}: {}", json_path, e))?;
-        let reader = std::io::BufReader::new(file);
-        let nx: NxGraph =
-            serde_json::from_reader(reader).map_err(|e| format!("JSON parse error: {}", e))?;
+        // Load everything from JSON first (nodes + v1 edges with PMIDs)
+        let mut kg = Self::load(json_path)?;
 
-        let mut term_to_cui: HashMap<String, String> = HashMap::new();
-        let mut cui_to_node: HashMap<String, SuppNode> = HashMap::new();
-
-        for nx_node in &nx.nodes {
-            let node = SuppNode {
-                cui: nx_node.id.clone(),
-                terms: nx_node.terms.clone(),
-                semtypes: nx_node.semtypes.clone(),
-            };
-            for term in &nx_node.terms {
-                term_to_cui.insert(term.to_lowercase(), nx_node.id.clone());
-            }
-            cui_to_node.insert(nx_node.id.clone(), node);
-        }
-
-        // Load edges from v2 edgelist
+        // Merge v2 edgelist edges on top
         let el_file = std::fs::File::open(edgelist_path)
             .map_err(|e| format!("Failed to open {}: {}", edgelist_path, e))?;
         let el_reader = std::io::BufReader::new(el_file);
-
-        let mut edges: HashMap<(String, String), Vec<SuppEdge>> = HashMap::new();
-        let mut outgoing: HashMap<String, Vec<(String, String)>> = HashMap::new();
 
         for line in el_reader.lines() {
             let line = line.map_err(|e| format!("Read error: {}", e))?;
@@ -135,12 +114,11 @@ impl SuppKg {
 
                 let key = (src.clone(), tgt.clone());
 
-                // Check if we already have this (src, tgt, predicate) — append citation
-                let edge_list = edges.entry(key).or_default();
+                let edge_list = kg.edges.entry(key).or_default();
                 if let Some(existing) = edge_list.iter_mut().find(|e| e.predicate == predicate) {
                     existing.citations.push(citation);
                 } else {
-                    outgoing
+                    kg.outgoing
                         .entry(src.clone())
                         .or_default()
                         .push((tgt.clone(), predicate.clone()));
@@ -155,12 +133,7 @@ impl SuppKg {
             }
         }
 
-        Ok(Self {
-            term_to_cui,
-            cui_to_node,
-            edges,
-            outgoing,
-        })
+        Ok(kg)
     }
 
     /// Resolve a node name to a CUI via exact case-insensitive match.
