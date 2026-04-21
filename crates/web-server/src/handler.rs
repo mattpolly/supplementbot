@@ -634,6 +634,12 @@ async fn gather_citations_for_ingredients(
             if !seen_pmids.insert(pmid) { continue; }
 
             let sentence_lower = r.sentence.to_lowercase();
+
+            // Skip citations with negative evidence or irrelevant framing
+            if sentence_is_negative(&sentence_lower) {
+                continue;
+            }
+
             let mut keyword_hits: f64 = 0.0;
             for term in context_terms {
                 if sentence_lower.contains(term.as_str()) {
@@ -666,6 +672,46 @@ async fn gather_citations_for_ingredients(
     }
 
     result
+}
+
+/// Returns true if the sentence expresses negative evidence, lack of data,
+/// or is otherwise unsuitable for display as supporting research.
+fn sentence_is_negative(sentence: &str) -> bool {
+    const NEGATIVE_PHRASES: &[&str] = &[
+        "no good clinical",
+        "no clinical evidence",
+        "no evidence",
+        "no significant",
+        "not effective",
+        "not been shown",
+        "not been demonstrated",
+        "not supported",
+        "insufficient evidence",
+        "insufficient data",
+        "lack of evidence",
+        "lacks evidence",
+        "failed to show",
+        "failed to demonstrate",
+        "did not show",
+        "did not demonstrate",
+        "did not improve",
+        "did not reduce",
+        "no benefit",
+        "no effect",
+        "no improvement",
+        "no difference",
+        "no reduction",
+        "inconclusive",
+        "not recommended",
+        "cannot be recommended",
+        "should not be used",
+        "no data support",
+        "limited evidence",
+        "weak evidence",
+        "poorly studied",
+        "not well studied",
+    ];
+    NEGATIVE_PHRASES.iter().any(|phrase| sentence.contains(phrase))
 }
 
 /// For each top candidate, resolve its CUI and look up PubMed citations.

@@ -469,6 +469,15 @@ Rather than depending on any single external KG, we build our own ingredient kno
 - Provides `search_terms_for()` returning curated terms or fallback to name+synonyms
 - Used by both CUI resolution and sentence search phases
 
+**Phase 2.5: Runtime citation display (IN PROGRESS — 2026-04-21)**
+- Backend `gather_citations_for_response()` in `handler.rs` looks up citations for ingredients mentioned in each response
+- Frontend `showCitations()` in `chat.js` renders a side panel with grouped, collapsible citation cards
+- CSS grid layout (`1fr | 900px | 1fr`) keeps chat centered when citations panel appears
+- Citations accumulate across turns (append, don't replace) with auto-scroll
+- Relevance ranking: keyword matching against session symptoms/systems and response text
+- Negative-evidence filter: skip sentences expressing lack of data, negative results, etc.
+- **Open problem:** SuppKG `target_node` values don't map to our ontology's body systems, so relevance depends on crude sentence keyword matching. Ideal solution: thread the graph traversal path into citation lookup so citations match the specific edge that justified the recommendation.
+
 **Phase 3: CTD integration**
 - Use CTD's curated chemical-disease file for additional PMIDs per ingredient
 - CTD edges are disease-level (not mechanism-level), so they cannot be surfaced as supplement claims directly

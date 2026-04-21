@@ -212,6 +212,33 @@ Initial naive implementation took 10+ minutes with 960k junk rows and caused swa
 - Batch DB dedup (1 query per ingredient, not per citation)
 - Removed inverted index attempt (too memory-hungry for 8GB server)
 
+### Runtime Citation Display (2026-04-21)
+
+**Status: IN PROGRESS.** Citations are stored and the backend sends them via WebSocket. The frontend renders them in a side panel. Several issues remain:
+
+**Solved:**
+- `STATIC_DIR` env var required — removed stale `/home/mpolly/supplementbot.com` hardcoded fallback in `main.rs`. Without `STATIC_DIR` set, bodhi was serving an old chat.js that lacked citation rendering code.
+- Layout shift — switched from flexbox to CSS grid (`1fr | 900px | 1fr`) so the chat widget stays centered when the citations panel appears.
+- Citation accumulation — citations now append across conversation turns instead of being replaced. Panel auto-scrolls to newest group.
+
+**Ongoing: Citation Relevance**
+
+SuppKG citations are stored with `target_node` values from SuppKG's raw CUI namespace (e.g., "alcohol", "brown rat", "apoptosis"), **not** our graph's body system names. This makes target_node matching nearly useless for relevance filtering.
+
+Current approach (iterating):
+1. Extract context terms from session symptoms, systems, and response text (with stop word filtering)
+2. Score each citation by keyword hits in the sentence text
+3. Partition into relevant (any keyword match) vs. fallback (confidence-only)
+4. Prefer relevant citations; only use fallback if none match
+5. Filter out negative-evidence sentences ("no good clinical data", "failed to show", etc.)
+
+**Problems observed:**
+- "Nasal congestion" → quercetin citations showed cervical cancer research (high confidence, zero relevance)
+- After keyword ranking fix, showed "no good clinical research data on quercetin" (negative evidence, topically relevant)
+- Vitamin D citations showed milk fat in early childhood (off-topic)
+
+**Root cause:** SuppKG's 22k citations per ingredient are not curated for any specific use case. The sentence text is the only relevance signal, and keyword matching is crude. The ideal fix would thread the actual graph traversal path (which edges connected the ingredient to the user's complaint) into the citation lookup, filtering by the specific body system/mechanism that justified the recommendation.
+
 ### Remaining Open Questions
 
 These are no longer blockers but remain relevant for future expansion:
@@ -219,3 +246,4 @@ These are no longer blockers but remain relevant for future expansion:
 1. Is there a current biomedical KG with standard UMLS CUIs and PubMed citations for supplements?
 2. Can CTD disease-level PMIDs be reframed into mechanism-level citations via LLM extraction?
 3. Can PubMed E-utilities provide fresh citations beyond what SuppKG covers?
+4. Can we wire the graph traversal path into citation lookup so citations match the specific edge that justified the recommendation?
