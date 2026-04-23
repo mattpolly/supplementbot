@@ -40,8 +40,52 @@ pub enum IntakePhase {
     Differentiation,
     /// Check if user's symptoms are adverse reactions to disclosed supplements
     CausationInquiry,
+    /// Three wrap-up questions before final recommendation:
+    /// 1. Associated symptoms  2. Suspected cause  3. Anything else?
+    PreRecommendation,
     /// Final results presentation
     Recommendation,
+    /// Post-recommendation follow-up — user can ask more questions
+    FollowUp,
+}
+
+/// Tracks which pre-recommendation questions have been asked.
+#[derive(Debug, Clone, Default)]
+pub struct PreRecommendationState {
+    /// Asked about associated/related symptoms
+    pub associated_symptoms_asked: bool,
+    /// Asked what they think caused it
+    pub suspected_cause_asked: bool,
+    /// Asked "ready for my thoughts, or anything else?"
+    pub final_gate_asked: bool,
+}
+
+impl PreRecommendationState {
+    pub fn complete(&self) -> bool {
+        self.associated_symptoms_asked
+            && self.suspected_cause_asked
+            && self.final_gate_asked
+    }
+
+    /// Returns the next question to ask, or None if all done.
+    pub fn next_question(&self) -> Option<PreRecommendationStep> {
+        if !self.associated_symptoms_asked {
+            Some(PreRecommendationStep::AssociatedSymptoms)
+        } else if !self.suspected_cause_asked {
+            Some(PreRecommendationStep::SuspectedCause)
+        } else if !self.final_gate_asked {
+            Some(PreRecommendationStep::FinalGate)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreRecommendationStep {
+    AssociatedSymptoms,
+    SuspectedCause,
+    FinalGate,
 }
 
 /// OLDCARTS mnemonic state — tracks what clinical dimensions have been gathered.
@@ -175,15 +219,17 @@ impl IntakeChecklist {
 
     /// Returns the template ID of the next unchecked required question,
     /// or None if complete (contraindication check is handled separately).
+    /// Order: prescriptions → health conditions (both safety-critical, asked
+    /// immediately) → OTC/supplements (asked when natural).
     pub fn next_required_question(&self) -> Option<&'static str> {
         if !self.prescriptions_asked {
             return Some("ask_prescriptions");
         }
-        if !self.otc_and_supplements_asked {
-            return Some("ask_otc_supplements");
-        }
         if !self.health_conditions_asked {
             return Some("ask_health_conditions");
+        }
+        if !self.otc_and_supplements_asked {
+            return Some("ask_otc_supplements");
         }
         None
     }
@@ -222,6 +268,8 @@ pub struct IntakeSession {
     pub last_differentiator_count: usize,
     /// How many turns have been spent in the Differentiation phase.
     pub differentiation_turns: usize,
+    /// Tracks pre-recommendation wrap-up questions.
+    pub pre_recommendation: PreRecommendationState,
 }
 
 impl IntakeSession {
@@ -245,6 +293,7 @@ impl IntakeSession {
             disclosed_supplements: Vec::new(),
             last_differentiator_count: 0,
             differentiation_turns: 0,
+            pre_recommendation: PreRecommendationState::default(),
         }
     }
 

@@ -1,6 +1,6 @@
 # Intake System — Design & Implementation
 
-*Intake agent design reviewed by Claude, Gemini, and Grok (2026-03-24). Intake KG reviewed by Gemini and Grok (2026-03-26). Full implementation complete and integrated (2026-03-27).*
+*Intake agent design reviewed by Claude, Gemini, and Grok (2026-03-24). Intake KG reviewed by Gemini and Grok (2026-03-26). Full implementation complete and integrated (2026-03-27). Safety-first redesign and PreRecommendation/FollowUp phases added (2026-04-22).*
 
 ---
 
@@ -68,6 +68,50 @@ The intake KG consults the supplement KG dynamically via `GraphAction` nodes. Ad
 
 ---
 
+## Safety Model — Two Tiers
+
+The intake system distinguishes between **hard safety gates** (non-negotiable, never skippable)
+and **soft clinical questions** (good practice, but deferrable when the user signals urgency).
+
+### Hard Gates (non-negotiable)
+
+These must be completed before ANY supplement name is mentioned to the user — including
+casual candidate preview lines like "I'm thinking about quercetin." This is the single
+most important rule in the system.
+
+| Gate | Template ID | Why |
+|------|-------------|-----|
+| Prescriptions | `ask_prescriptions` | Drug-supplement interactions are safety-critical |
+| Health conditions | `ask_health_conditions` | Condition contraindications (pregnancy, kidney/liver disease, etc.) |
+
+**Enforcement:**
+- Engine forces these **immediately** on entering HPI — no waiting for OLDCARTS fields
+- Candidate awareness prompt (`build_context` / `build_context_v2`) is gated behind
+  `prescriptions_asked && health_conditions_asked`
+- `PreRecommendation` and `Recommendation` phases are gated behind `checklist.complete()`
+- Engine intercepts any transition to these phases if checklist is incomplete, redirecting to HPI
+
+**Question order:** prescriptions → health conditions → OTC/supplements. The first two are
+safety-critical and asked immediately. OTC/supplements is asked when natural in conversation flow.
+
+### Soft Questions (read the room)
+
+These are good clinical practice but skippable if the user signals urgency:
+
+| Question | Phase | When to skip |
+|----------|-------|-------------|
+| Associated symptoms | PreRecommendation | User says "just give me your recommendation" |
+| Suspected cause | PreRecommendation | User signals `Disengaged` or `DoneSharing` |
+| "Anything else?" | PreRecommendation | User signals `WantsRecommendations` |
+| OLDCARTS deep-dive | HPI | User is disengaged after safety questions answered |
+| System review | ReviewOfSystems | Clear winner with >40% confidence gap |
+
+**"Reading the room"** means the system adapts to user urgency. If someone says "I don't
+have much time, just give me your thoughts," the system skips PreRecommendation entirely
+and goes straight to Recommendation. Safety questions are never skipped regardless.
+
+---
+
 ## Intake Knowledge Graph
 
 **Crate:** `graph-service` — `crates/graph-service/src/intake/`
@@ -91,7 +135,7 @@ Root cause: the LLM was asked to reason about clinical interviewing with no stru
 
 | Type | Description |
 |------|-------------|
-| `IntakeStage` | A phase: chief_complaint, hpi, system_review, differentiation, causation_inquiry, recommendation |
+| `IntakeStage` | A phase: chief_complaint, hpi, system_review, differentiation, causation_inquiry, pre_recommendation, recommendation, follow_up |
 | `QuestionTemplate` | Parameterized question with {placeholders} and optional OLDCARTS dimension target |
 | `ClinicalGoal` | What info to gather (e.g., "characterize_onset"), linked to extractor fields |
 | `ExitCondition` | Gate for leaving a stage (OldcartsSufficient, UserDisengaged, CandidatesConfident, etc.) |
@@ -152,7 +196,7 @@ Bridge between the two graphs. When the engine says "do X", the executor runs X 
 
 ### Population Strategy
 
-1. **Core structure** — 6 stages, goals, questions, exit conditions, edges (in `seed.rs`, idempotent)
+1. **Core structure** — 8 stages (including pre_recommendation and follow_up), goals, questions, exit conditions, edges (in `seed.rs`, idempotent)
 2. **Archetype profiles** (~10) + symptom profiles (392 from iDISK) with archetype assignment
 3. **Drug & interaction knowledge** from iDISK relation files
 4. **Ingredient enrichment** — mechanism of action, safety text from iDISK DSI entities
@@ -168,7 +212,7 @@ Bridge between the two graphs. When the engine says "do X", the executor runs X 
 
 Tracks a single conversation. Key fields:
 
-- `phase: IntakePhase` — six phases (ChiefComplaint → Hpi → ReviewOfSystems → Differentiation → CausationInquiry → Recommendation)
+- `phase: IntakePhase` — eight phases (ChiefComplaint → Hpi → ReviewOfSystems → Differentiation → CausationInquiry → PreRecommendation → Recommendation → FollowUp)
 - `chief_complaints: Vec<ChiefComplaint>` — raw text + mapped symptoms/systems
 - `oldcarts: OldcartsState` — 9 clinical dimensions with `filled_dimensions()` → `HashSet<OldcartsDimension>`
 - `candidates: CandidateSet` — ranked ingredient candidates
@@ -180,21 +224,83 @@ Tracks a single conversation. Key fields:
 - `last_differentiator_count: usize` — from previous turn's executor (engine needs it for transitions)
 - `differentiation_turns: usize` — capped at 3; Differentiation exits after 3 turns even if discriminators remain
 - `checklist: IntakeChecklist` — four required safety touchpoints (see below)
+- `pre_recommendation: PreRecommendationState` — tracks which wrap-up questions have been asked
+
+### Phase Flow
+
+```
+ChiefComplaint → Hpi → ReviewOfSystems → Differentiation → CausationInquiry
+                                                                    ↓
+                                              PreRecommendation (soft)
+                                                        ↓
+                                                  Recommendation
+                                                        ↓
+                                                    FollowUp
+```
+
+- **PreRecommendation** is soft — skipped entirely if user signals `WantsRecommendations`,
+  `DoneSharing`, or `Disengaged`
+- **Recommendation** is no longer terminal — transitions to FollowUp
+- **FollowUp** is open-ended — user can ask questions, explore other symptoms, or dig into
+  specific supplements. Session stays open until the user closes the tab.
 
 ### Phase Transitions
 
 The engine evaluates exit conditions per stage:
 - **CC → HPI**: when at least one chief complaint is recorded
-- **HPI → SystemReview/Differentiation/Recommendation**: when OLDCARTS dimensions are sufficient for active profiles, confidence ≥0.15 ahead of others, or user signals done
-- **SystemReview → Differentiation/Recommendation**: when all cluster-prioritized systems reviewed
-- **Differentiation → CausationInquiry**: after 3 `differentiation_turns` OR when disclosed medications have interactions to discuss
-- **CausationInquiry → Recommendation**: always (single-turn acknowledgment)
-- **Safety checklist chokepoint**: `next_turn()` intercepts any transition to Recommendation — if `checklist.complete()` is false, redirects to HPI. Single enforcement point regardless of which path triggered the transition. The checklist requires four items in partial order:
-  1. `prescriptions_asked` — bot asked `ask_prescriptions`
-  2. `otc_and_supplements_asked` — bot asked `ask_otc_supplements`
-  3. `health_conditions_asked` — bot asked `ask_health_conditions`
-  4. `contraindications_checked` — set automatically once 1–3 are true; no question needed
-  Items 1–3 are forced by the engine (score 10.0) once ≥2 OLDCARTS dimensions are filled. Each flag is set **only** when the engine delivers the template — never from user-volunteered information (liability requirement).
+- **HPI → SystemReview/Differentiation/PreRecommendation**: when OLDCARTS dimensions are sufficient for active profiles, confidence ≥0.15 ahead of others, or user signals done
+- **SystemReview → Differentiation/PreRecommendation**: when all cluster-prioritized systems reviewed
+- **Differentiation → CausationInquiry/PreRecommendation**: after 3 `differentiation_turns` OR when disclosed medications have interactions to discuss
+- **CausationInquiry → PreRecommendation**: always (single-turn acknowledgment)
+- **PreRecommendation → Recommendation**: when all three sub-questions asked, OR user signals urgency
+- **Recommendation → FollowUp**: after recommendation is delivered
+- **FollowUp → FollowUp**: open-ended, stays here
+
+**Safety checklist chokepoint**: `next_turn()` intercepts any transition to PreRecommendation
+or Recommendation — if `checklist.complete()` is false, redirects to HPI. Single enforcement
+point regardless of which path triggered the transition.
+
+The checklist requires four items:
+1. `prescriptions_asked` — bot asked `ask_prescriptions` (forced immediately in HPI)
+2. `health_conditions_asked` — bot asked `ask_health_conditions` (forced immediately in HPI)
+3. `otc_and_supplements_asked` — bot asked `ask_otc_supplements` (asked when natural)
+4. `contraindications_checked` — set automatically once 1–3 are true; no question needed
+
+Items 1–2 are forced **immediately** when entering HPI — before any OLDCARTS deep-dive.
+Each flag is set **only** when the engine delivers the template — never from user-volunteered
+information (liability requirement).
+
+### PreRecommendation Sub-Questions
+
+Three wrap-up questions asked one per turn before the recommendation:
+
+| Step | Purpose | Example phrasing |
+|------|---------|-----------------|
+| `AssociatedSymptoms` | Surface related symptoms they haven't mentioned | "Any other symptoms that tend to come along with the congestion?" |
+| `SuspectedCause` | Capture user's intuition about triggers | "Do you have any sense of what might be triggering this?" |
+| `FinalGate` | Last chance to share context before recommendation | "I think I have a good picture — ready for my thoughts, or anything else I should know?" |
+
+These are tracked by `PreRecommendationState` on the session. The handler advances the state
+each turn. The LLM is instructed to vary phrasing — no verbatim templates.
+
+**Skippable**: If the user signals `WantsRecommendations` or `DoneSharing` at any point, the
+system skips remaining PreRecommendation questions and goes straight to Recommendation.
+`Disengaged` also triggers a skip.
+
+### Candidate Awareness (Supplement Name Mentions)
+
+The context builder can weave brief mentions of current candidates into responses ("I'm
+thinking about quercetin and probiotics for this"). This makes the conversation feel
+collaborative rather than interrogative.
+
+**Hard safety gate**: Candidate awareness is ONLY enabled when:
+- `prescriptions_asked == true` AND `health_conditions_asked == true`
+- At least 1 OLDCARTS dimension is filled
+- Not in Recommendation, CausationInquiry, PreRecommendation, or FollowUp phases
+
+**Phrasing**: The prompt instructs the LLM to vary phrasing each turn — never repeat the
+same opener. Suggestions include working it into the middle of the response, referencing it
+casually, and tying it to something the user just said.
 
 ### Safety (Three Layers)
 
@@ -217,6 +323,9 @@ Two implementations:
 
 - **`build_context` (v1)** — hardcoded OLDCARTS mnemonic, all 9 dimensions, generic per-phase task instructions
 - **`build_context_v2` (v2, active)** — graph-driven: only relevant OLDCARTS dimensions for active profiles, task instruction from engine's `TurnAction` output, iDISK interaction/adverse/mechanism data from executor results
+
+Both implementations enforce the candidate awareness safety gate (prescriptions + conditions
+asked before any supplement name).
 
 ### Candidate Scoring
 
@@ -243,40 +352,54 @@ Patient: "My legs hurt at night and I can't sleep."
 4. `GraphAction:QueryCandidates` fires → supplement KG returns initial candidates
 5. `ExitCondition:has_chief_complaint` met → transition to HPI
 
-**Turns 2–5 — HPI (EIG-driven OLDCARTS)**
+**Turn 2 — Safety: Prescriptions (forced immediately)**
+1. Engine forces `ask_prescriptions` at score 10.0 — first priority in HPI
+2. "Before I dig in, are you currently taking any prescription medications?"
+3. Patient: "I take an SSRI"
+4. No supplement names mentioned yet — candidate awareness is gated
+
+**Turn 3 — Safety: Health Conditions (forced immediately)**
+1. Engine forces `ask_health_conditions` at score 10.0 — second priority
+2. "Quick safety question — any health conditions I should know about? Pregnancy, kidney or liver disease, heart issues?"
+3. Patient: "No, nothing like that"
+4. Safety questions complete for prescriptions + conditions → candidate awareness now unlocked
+
+**Turns 4–6 — HPI (EIG-driven OLDCARTS)**
 1. Pain archetype marks Location and Radiation as irrelevant for leg pain → skipped
 2. EIG selects onset (high priority + high information gain) → "When did the leg pain start?"
-3. Patient: "Two weeks ago" → extractor fills onset → goal fulfilled
-4. `SymptomCluster` check: leg pain + insomnia matches "electrolyte_deficiency" cluster → prioritizes nervous system review
-5. After sufficient dimensions filled → transition to SystemReview
+3. Candidate awareness now active: "I'm already thinking about things like magnesium for this..."
+4. After sufficient dimensions filled → transition to SystemReview
 
-**Turns 6–7 — System Review**
+**Turns 7–8 — System Review**
 1. `GraphAction:FindAdjacentSystems` identifies systems connected to candidates
 2. Cluster-prioritized systems asked first (nervous, then musculoskeletal)
 3. Denials recorded as pertinent negatives → penalize dependent candidates
 
-**Turn 8 — Differentiation**
+**Turn 9 — Differentiation**
 1. `GraphAction:FindDiscriminators` finds non-shared nodes between top candidates
 2. Entropy-sorted: prefer questions that split candidates closest to 50/50
-
-**Turns 9a–9c — Safety Checklist (required before recommendation)**
-1. Engine forces `ask_prescriptions`: "Are you currently taking any prescription medications?"
-2. Engine forces `ask_otc_supplements`: "Are you taking any OTC medications or supplements right now?"
-3. Engine forces `ask_health_conditions`: "Do you have any health conditions I should know about — pregnancy, kidney or liver disease, heart problems?"
-4. `contraindications_checked` flips automatically — iDISK interaction check already ran in executor
-- All three questions are forced at score 10.0 (highest priority) once ≥2 OLDCARTS dimensions filled
-- Patient example: "I take an SSRI" / "just vitamin D" / "no conditions"
 
 **Turn 9b — Causation Inquiry (if applicable)**
 1. `GraphAction:CheckInteractions` → SSRI found in iDISK interaction edges
 2. `GraphAction:CheckAdverseReactions` → cross-reference symptoms against disclosed supplements
 3. "I want to mention — some supplements can interact with SSRIs. Let me factor that into what I share."
 
-**Turn 10 — Recommendation**
+**Turns 10–12 — PreRecommendation (soft, skippable)**
+1. "Any other symptoms that tend to come along with the leg pain?"
+2. "Do you have a sense of what might be triggering this?"
+3. "I think I have a good picture — ready for my thoughts, or is there anything else?"
+- If patient says "just tell me" at any point → skip to Recommendation
+
+**Turn 13 — Recommendation**
 1. `GraphAction:FetchMechanism` pulls Mechanism of Action text from iDISK
 2. LLM renders using sourced text: "For symptoms like yours, the literature suggests..."
 3. Interaction warnings included with source descriptions from iDISK
 4. "Please discuss these with your healthcare provider."
+
+**Turns 14+ — FollowUp (open-ended)**
+1. Patient: "What about the sleep issue specifically?"
+2. System discusses how current candidates relate to sleep, within the permitted supplement list
+3. Patient: "Thanks, that's helpful" → session stays open, patient can close tab when done
 
 ---
 
@@ -304,14 +427,17 @@ Patient: "My legs hurt at night and I can't sleep."
 | CausationInquiry stage | Adverse reaction / de-prescribing checks | Gemini |
 | Archetype Profiles | ~10 archetypes covering 80% of interview logic | Gemini |
 | Context management | Summarize turns after ~8 | Grok |
+| Safety-first ordering | Prescriptions + conditions before ANY supplement mention (2026-04-22) | User requirement |
+| PreRecommendation soft gate | Wrap-up questions skippable on user urgency (2026-04-22) | User requirement |
+| Non-terminal recommendation | FollowUp phase after recommendation (2026-04-22) | User requirement |
 
 ---
 
-## Implementation Notes (2026-03-27)
+## Implementation Notes (2026-03-27, updated 2026-04-22)
 
 ### Key decisions made during build
 
-**Phase ↔ Stage mapping.** `IntakeSession` uses `IntakePhase` (intake-agent crate) while the engine uses `IntakeStageId` (graph-service crate). The handler converts with `phase_to_stage()` / `stage_to_phase()`.
+**Phase ↔ Stage mapping.** `IntakeSession` uses `IntakePhase` (intake-agent crate) while the engine uses `IntakeStageId` (graph-service crate). The handler converts with `phase_to_stage()` / `stage_to_phase()`. Both enums now include PreRecommendation and FollowUp.
 
 **Differentiator count is from the previous turn.** The engine needs it for transitions, but discriminators come from the executor which runs after the engine. Solution: `last_differentiator_count` persisted on the session.
 
@@ -322,6 +448,10 @@ Patient: "My legs hurt at night and I can't sleep."
 **Disclosed supplements vs medications.** Handler currently treats all disclosed items as both. Future: split based on iDISK ingredient table lookup.
 
 **Relevant dimensions passed externally.** `IntakeEngine::relevant_dimensions()` made public so handler can pass to `build_context_v2()`.
+
+**Session never auto-completes.** The `complete` flag in `TurnResult` is always `false`. The WebSocket loop no longer breaks after Recommendation — the session stays open for FollowUp. The user ends the session by closing the tab.
+
+**PreRecommendation state advancement.** The handler advances `PreRecommendationState` each turn during the PreRecommendation phase, marking the current sub-question as asked so the next turn gets the next question.
 
 ### What v2 replaced
 
@@ -351,18 +481,18 @@ Old modules (`phase.rs`, `differentiator.rs`, `candidates.rs`) still compile and
 6. ✅ ResponsePattern: reuse extractor directly *(Grok)*
 7. ✅ Implicit fulfillment: post-extraction graph check *(Grok)*
 8. ✅ GraphAction: keep as node *(Grok over Gemini)*
+9. ✅ Session termination: non-terminal, FollowUp phase (2026-04-22)
+10. ✅ Safety question ordering: prescriptions + conditions first, before any supplement mention (2026-04-22)
+11. ✅ PreRecommendation: soft gate, skippable on user urgency (2026-04-22)
 
 ### Open
-9. **Versioning** — tag intake KG nodes with `min_supplement_kg_version` or use CUI-based references?
-10. **Adverse reaction legal framing** — how far can we go? "Discuss with your doctor" seems safe.
-11. **Product-level knowledge** — resolve brand names to iDISK ingredients? Overkill for v1?
-12. **iDISK Source_Description** — feed interaction descriptions directly into prompt, or summarize?
-13. **SymptomCluster population** — how many clusters needed? LLM-assisted discovery + human review.
-14. **Multi-symptom parallel profiles** — goal merging across active profiles. ✅ Implemented.
-15. **Safety bypass prevention** — engine-level enforcement. ✅ Implemented via `safety_gate` on edges.
-16. **`max_asks` default** — set to 2. Working well.
+12. **Versioning** — tag intake KG nodes with `min_supplement_kg_version` or use CUI-based references?
+13. **Adverse reaction legal framing** — how far can we go? "Discuss with your doctor" seems safe.
+14. **Product-level knowledge** — resolve brand names to iDISK ingredients? Overkill for v1?
+15. **iDISK Source_Description** — feed interaction descriptions directly into prompt, or summarize?
+16. **SymptomCluster population** — how many clusters needed? LLM-assisted discovery + human review.
 17. **Debugging infrastructure** — synthetic patient harness and coverage metrics still needed.
-18. **Hardcoded task removal** — ✅ Done. Graph traversal output is the task instruction.
+18. **Candidate stability** — candidates are fully replaced each turn via the executor. When the user clarifies context (e.g., "I think it's allergies"), candidates that were relevant to the original framing may drop off. Consider pinning high-confidence candidates or weighting user-confirmed context more heavily.
 
 ---
 
@@ -412,4 +542,6 @@ Old modules (`phase.rs`, `differentiator.rs`, `candidates.rs`) still compile and
 - **Supplement vs medication splitting** — use iDISK ingredient table to classify disclosed items
 - **Synthetic patient test harness** — regression testing for intake quality
 - **"Why this question?" transparency** — expandable cards showing graph basis
+- **Candidate pinning** — prevent high-confidence candidates from being replaced when user clarifies context
+- **Multi-complaint parallel tracks** — allow separate recommendation tracks per chief complaint (e.g., quercetin for allergies AND magnesium for tension headaches)
 - **Dual-graph alignment (Reflection Modeling)** — long-term: patient session state as a temporal KG, with embedding similarity + graph traversal overlaps producing "reflection bridges"

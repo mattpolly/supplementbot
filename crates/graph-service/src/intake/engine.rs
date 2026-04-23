@@ -87,9 +87,12 @@ impl<'a> IntakeEngine<'a> {
 
         // Step 1: Check if we should transition stages
         if let Some(mut next) = self.evaluate_transition(ctx, &mut trace).await {
-            // Policy gate: Recommendation is NEVER reachable until checklist is complete.
-            // This is the single enforcement point — no path bypasses this check.
-            if next == IntakeStageId::Recommendation && !ctx.checklist_complete {
+            // Policy gate: PreRecommendation/Recommendation is NEVER reachable until
+            // checklist is complete. This is the single enforcement point.
+            if (next == IntakeStageId::PreRecommendation
+                || next == IntakeStageId::Recommendation)
+                && !ctx.checklist_complete
+            {
                 trace.push(format!(
                     "GATE: Recommendation blocked — checklist incomplete (next: {:?}) → HPI",
                     ctx.checklist_next_question
@@ -151,8 +154,8 @@ impl<'a> IntakeEngine<'a> {
                     && ctx.filled_count >= 2
                     && ctx.checklist_complete
                 {
-                    trace.push("Confident candidates + checklist complete → Recommendation".into());
-                    return Some(IntakeStageId::Recommendation);
+                    trace.push("Confident candidates + checklist complete → PreRecommendation".into());
+                    return Some(IntakeStageId::PreRecommendation);
                 }
 
                 // User done sharing
@@ -161,8 +164,8 @@ impl<'a> IntakeEngine<'a> {
                         trace.push("User done but checklist incomplete — staying for safety questions".into());
                         return None;
                     }
-                    trace.push("User done sharing → Recommendation".into());
-                    return Some(IntakeStageId::Recommendation);
+                    trace.push("User done sharing → PreRecommendation".into());
+                    return Some(IntakeStageId::PreRecommendation);
                 }
 
                 // User done sharing but no candidates — still go to Recommendation
@@ -173,8 +176,8 @@ impl<'a> IntakeEngine<'a> {
                         trace.push("User done sharing (no candidates), checklist incomplete — staying for safety questions".into());
                         return None;
                     }
-                    trace.push("User done sharing, no candidates → Recommendation (empty)".into());
-                    return Some(IntakeStageId::Recommendation);
+                    trace.push("User done sharing, no candidates → PreRecommendation (empty)".into());
+                    return Some(IntakeStageId::PreRecommendation);
                 }
 
                 // Check if enough OLDCARTS filled
@@ -193,8 +196,8 @@ impl<'a> IntakeEngine<'a> {
                             trace.push("OLDCARTS sufficient, systems done → Differentiation".into());
                             return Some(IntakeStageId::Differentiation);
                         } else if ctx.checklist_complete {
-                            trace.push("OLDCARTS sufficient, no diff, checklist complete → Recommendation".into());
-                            return Some(IntakeStageId::Recommendation);
+                            trace.push("OLDCARTS sufficient, no diff, checklist complete → PreRecommendation".into());
+                            return Some(IntakeStageId::PreRecommendation);
                         }
                     } else {
                         // OLDCARTS sufficient but still no candidates — go to recommendation
@@ -203,16 +206,16 @@ impl<'a> IntakeEngine<'a> {
                         if !ctx.checklist_complete {
                             trace.push("OLDCARTS sufficient, no candidates, checklist incomplete — staying for safety questions".into());
                         } else {
-                            trace.push("OLDCARTS sufficient, no candidates → Recommendation (empty)".into());
-                            return Some(IntakeStageId::Recommendation);
+                            trace.push("OLDCARTS sufficient, no candidates → PreRecommendation (empty)".into());
+                            return Some(IntakeStageId::PreRecommendation);
                         }
                     }
                 }
 
                 // User disengaged
                 if ctx.user_disengaged && ctx.candidate_count > 0 && ctx.checklist_complete {
-                    trace.push("User disengaged → Recommendation".into());
-                    return Some(IntakeStageId::Recommendation);
+                    trace.push("User disengaged → PreRecommendation".into());
+                    return Some(IntakeStageId::PreRecommendation);
                 }
 
                 // User disengaged with no candidates
@@ -221,8 +224,8 @@ impl<'a> IntakeEngine<'a> {
                         trace.push("User disengaged (no candidates), checklist incomplete — staying for safety questions".into());
                         return None;
                     }
-                    trace.push("User disengaged, no candidates → Recommendation (empty)".into());
-                    return Some(IntakeStageId::Recommendation);
+                    trace.push("User disengaged, no candidates → PreRecommendation (empty)".into());
+                    return Some(IntakeStageId::PreRecommendation);
                 }
             }
 
@@ -238,8 +241,8 @@ impl<'a> IntakeEngine<'a> {
                         trace.push("Systems reviewed, checklist incomplete → HPI for safety questions".into());
                         return Some(IntakeStageId::Hpi);
                     } else {
-                        trace.push("Systems reviewed → Recommendation".into());
-                        return Some(IntakeStageId::Recommendation);
+                        trace.push("Systems reviewed → PreRecommendation".into());
+                        return Some(IntakeStageId::PreRecommendation);
                     }
                 }
             }
@@ -258,20 +261,31 @@ impl<'a> IntakeEngine<'a> {
                         trace.push("Differentiation done, checklist incomplete → HPI for safety questions".into());
                         return Some(IntakeStageId::Hpi);
                     } else {
-                        trace.push("Differentiation done → Recommendation".into());
-                        return Some(IntakeStageId::Recommendation);
+                        trace.push("Differentiation done → PreRecommendation".into());
+                        return Some(IntakeStageId::PreRecommendation);
                     }
                 }
             }
 
             IntakeStageId::CausationInquiry => {
-                // Always move to recommendation after causation inquiry
-                trace.push("Causation inquiry complete → Recommendation".into());
-                return Some(IntakeStageId::Recommendation);
+                // Always move to pre-recommendation after causation inquiry
+                trace.push("Causation inquiry complete → PreRecommendation".into());
+                return Some(IntakeStageId::PreRecommendation);
+            }
+
+            IntakeStageId::PreRecommendation => {
+                // PreRecommendation sub-questions are managed by the handler.
+                // When all three are done, the handler transitions to Recommendation.
             }
 
             IntakeStageId::Recommendation => {
-                // Terminal stage
+                // After recommendation, move to follow-up
+                trace.push("Recommendation delivered → FollowUp".into());
+                return Some(IntakeStageId::FollowUp);
+            }
+
+            IntakeStageId::FollowUp => {
+                // Open-ended — user can keep asking
             }
         }
 
@@ -315,8 +329,16 @@ impl<'a> IntakeEngine<'a> {
                 }
                 return None;
             }
+            IntakeStageId::PreRecommendation => {
+                // Questions managed by handler via PreRecommendationState
+                return None;
+            }
             IntakeStageId::Recommendation => {
                 // No questions in recommendation phase
+                return None;
+            }
+            IntakeStageId::FollowUp => {
+                // User-driven, no forced questions
                 return None;
             }
         }
@@ -353,11 +375,12 @@ impl<'a> IntakeEngine<'a> {
         ctx: &TraversalContext,
         trace: &mut Vec<String>,
     ) -> Option<ResolvedQuestion> {
-        // Checklist gate: force the next required safety question before anything else.
-        // Triggered once we have ≥2 OLDCARTS dims filled (enough context to be useful).
-        // Questions are forced in order: prescriptions → otc/supplements → health conditions.
+        // Safety-first gate: force prescriptions and health conditions questions
+        // IMMEDIATELY — before any OLDCARTS deep-dive. No supplement name may be
+        // mentioned until these are answered. OTC/supplements can wait a bit longer.
+        // Questions are forced in order: prescriptions → health conditions → otc/supplements.
         // Contraindication check is handled separately after all three are asked.
-        if !ctx.checklist_complete && ctx.filled_count >= 2 {
+        if !ctx.checklist_complete {
             if let Some(template_id) = ctx.checklist_next_question {
                 if !ctx.visited_questions.contains(template_id) {
                     if let Some(q) = self.store.get_question(template_id).await {
@@ -694,9 +717,15 @@ impl<'a> IntakeEngine<'a> {
                 GraphActionType::CheckInteractions,
                 GraphActionType::CheckAdverseReactions,
             ],
+            IntakeStageId::PreRecommendation => vec![
+                GraphActionType::QueryCandidates,
+            ],
             IntakeStageId::Recommendation => vec![
                 GraphActionType::QueryCandidates,
                 GraphActionType::FetchMechanism,
+            ],
+            IntakeStageId::FollowUp => vec![
+                GraphActionType::QueryCandidates,
             ],
         }
     }

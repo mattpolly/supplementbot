@@ -198,11 +198,19 @@ pub fn build_context(
 
     // If we have candidates and are still gathering, tell the LLM to briefly
     // surface what it's considering before asking the next question.
+    // SAFETY GATE: Never mention supplement names until prescriptions and
+    // pre-existing conditions have been asked. This is non-negotiable.
     let is_questioning_phase = !matches!(
         session.phase,
-        IntakePhase::Recommendation | IntakePhase::CausationInquiry
+        IntakePhase::Recommendation
+            | IntakePhase::CausationInquiry
+            | IntakePhase::PreRecommendation
+            | IntakePhase::FollowUp
     );
-    if !session.candidates.is_empty() && is_questioning_phase && session.oldcarts.filled_count() >= 1 {
+    let safety_questions_done = session.checklist.prescriptions_asked
+        && session.checklist.health_conditions_asked;
+    if !session.candidates.is_empty() && is_questioning_phase
+        && safety_questions_done && session.oldcarts.filled_count() >= 1 {
         let top = session.candidates.top(2);
         let names: Vec<&str> = top.iter().map(|c| c.ingredient.as_str()).collect();
         prompt.push_str(&format!(
@@ -397,18 +405,20 @@ pub fn build_context_v2(
 
     // If we have candidates and are still gathering info, tell the LLM to
     // briefly surface what it's considering before asking the next question.
-    // This makes the conversation feel collaborative, not interrogative.
+    // SAFETY GATE: Never mention supplement names until prescriptions and
+    // pre-existing conditions have been asked. This is non-negotiable.
     let has_candidates = !session.candidates.is_empty();
     let still_gathering = !matches!(
         session.phase,
-        IntakePhase::Recommendation | IntakePhase::CausationInquiry
+        IntakePhase::Recommendation
+            | IntakePhase::CausationInquiry
+            | IntakePhase::PreRecommendation
+            | IntakePhase::FollowUp
     );
-    // Only show candidate awareness if at least 1 OLDCARTS dim is filled
-    // (so we don't surface on the very first question)
-    let enough_context = session.oldcarts.filled_count() >= 1
-        || !session.chief_complaints.is_empty() && session.oldcarts.filled_count() >= 0;
-    let show_candidate_preview = has_candidates && still_gathering && enough_context
-        && session.oldcarts.filled_count() >= 1;
+    let safety_questions_done = session.checklist.prescriptions_asked
+        && session.checklist.health_conditions_asked;
+    let show_candidate_preview = has_candidates && still_gathering
+        && safety_questions_done && session.oldcarts.filled_count() >= 1;
 
     if show_candidate_preview {
         let top = session.candidates.top(2);
@@ -478,6 +488,32 @@ pub fn build_context_v2(
                      Gently mention this possibility. Frame as: \"I want to mention —\n\
                      some of your symptoms can be associated with certain supplements.\"\n\
                      Do NOT say \"stop taking X.\" Instead suggest discussing with their doctor.\n",
+                );
+            }
+            IntakeStageId::PreRecommendation => {
+                prompt.push_str(pre_recommendation_instruction(session));
+                prompt.push('\n');
+            }
+            IntakeStageId::FollowUp => {
+                let permitted: Vec<String> = session
+                    .candidates
+                    .top(5)
+                    .iter()
+                    .map(|c| c.ingredient.clone())
+                    .collect();
+                if !permitted.is_empty() {
+                    prompt.push_str(&format!(
+                        "PERMITTED SUPPLEMENTS — YOU MAY ONLY DISCUSS THESE:\n  {}\n\n",
+                        permitted.join(", ")
+                    ));
+                }
+                prompt.push_str(
+                    "The user may have follow-up questions about your recommendations,\n\
+                     want to explore a different symptom, or ask about a specific supplement.\n\
+                     Answer naturally based on the session context. Continue to use affordance\n\
+                     language (\"may support\", \"research suggests\"). If they bring up a new\n\
+                     symptom, discuss how it relates to what you've already covered.\n\
+                     If the user seems done, let them know they can come back anytime.\n",
                 );
             }
             _ => {
@@ -572,7 +608,13 @@ fn phase_description(phase: &IntakePhase) -> &'static str {
         IntakePhase::CausationInquiry => {
             "Causation Inquiry — check if user's symptoms may be caused by current supplements"
         }
+        IntakePhase::PreRecommendation => {
+            "Pre-Recommendation — wrap-up questions before presenting final results"
+        }
         IntakePhase::Recommendation => "Recommendation — present final results with reasoning",
+        IntakePhase::FollowUp => {
+            "Follow-Up — user may ask questions about the recommendation or explore other symptoms"
+        }
     }
 }
 
@@ -616,6 +658,9 @@ fn task_instruction(session: &IntakeSession, differentiators: &[Differentiator])
              some of your symptoms can be associated with certain supplements.\"\n\
              Do NOT say \"stop taking X.\" Instead suggest discussing with their doctor."
         }
+        IntakePhase::PreRecommendation => {
+            pre_recommendation_instruction(session)
+        }
         IntakePhase::Recommendation => {
             "Present what the research suggests for their symptoms.\n\
              Frame as: \"For symptoms like yours, the literature suggests X\n\
@@ -629,6 +674,48 @@ fn task_instruction(session: &IntakeSession, differentiators: &[Differentiator])
              training knowledge suggests it could be relevant. The candidate list is derived\n\
              from a curated knowledge graph — it is your only permitted source of recommendations.\n\
              If a supplement is not listed, do not mention it."
+        }
+        IntakePhase::FollowUp => {
+            "The user may have follow-up questions about your recommendations, want to\n\
+             explore a different symptom, or ask about a specific supplement in more detail.\n\
+             Answer naturally based on the session context and current candidates.\n\
+             If they bring up a new symptom, acknowledge it and discuss how it might relate\n\
+             to what you've already covered.\n\
+             Continue to use affordance language (\"may support\", \"research suggests\").\n\
+             You may ONLY discuss supplements from the CURRENT CANDIDATES list.\n\
+             If the user seems done, let them know they can come back anytime."
+        }
+    }
+}
+
+fn pre_recommendation_instruction(session: &IntakeSession) -> &'static str {
+    use crate::session::PreRecommendationStep;
+    match session.pre_recommendation.next_question() {
+        Some(PreRecommendationStep::AssociatedSymptoms) => {
+            "Before sharing your thoughts, ask if there are any other symptoms\n\
+             related to or accompanying their chief complaint that they haven't\n\
+             mentioned yet. Frame naturally: \"Before I share what I'm finding,\n\
+             are there any other symptoms that tend to come along with the [complaint]?\"\n\
+             Vary your phrasing — don't use this example verbatim."
+        }
+        Some(PreRecommendationStep::SuspectedCause) => {
+            "Ask the user if they have any ideas about what might be causing\n\
+             their symptoms. People often have useful intuitions. Frame naturally:\n\
+             \"Do you have any sense of what might be triggering this?\" or\n\
+             \"Any ideas what might be behind it?\"\n\
+             Their answer may shift which candidates are most relevant."
+        }
+        Some(PreRecommendationStep::FinalGate) => {
+            "This is the last check before you present your findings. Ask if\n\
+             they're ready to hear your thoughts, or if there's anything else\n\
+             they think you should know first. Frame naturally:\n\
+             \"I think I have a good picture now — ready for my thoughts, or\n\
+             is there anything else you think I should know?\"\n\
+             Vary your phrasing."
+        }
+        None => {
+            // All pre-rec questions done — shouldn't stay here, but be safe
+            "You've gathered everything you need. Transition to your recommendation."
         }
     }
 }

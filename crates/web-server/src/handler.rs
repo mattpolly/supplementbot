@@ -449,6 +449,25 @@ pub async fn process_turn(
                 session.phase = stage_to_phase(next_stage);
             }
 
+            // Advance pre-recommendation sub-questions.
+            // Each turn in PreRecommendation marks the current step as asked,
+            // so the next turn gets the next question.
+            if session.phase == IntakePhase::PreRecommendation {
+                use intake_agent::session::PreRecommendationStep;
+                match session.pre_recommendation.next_question() {
+                    Some(PreRecommendationStep::AssociatedSymptoms) => {
+                        session.pre_recommendation.associated_symptoms_asked = true;
+                    }
+                    Some(PreRecommendationStep::SuspectedCause) => {
+                        session.pre_recommendation.suspected_cause_asked = true;
+                    }
+                    Some(PreRecommendationStep::FinalGate) => {
+                        session.pre_recommendation.final_gate_asked = true;
+                    }
+                    None => {} // all done, phase transition will handle it
+                }
+            }
+
             // Update lens level
             let new_lens = phase::compute_lens_level(session);
             session.escalate_lens(new_lens);
@@ -467,7 +486,8 @@ pub async fn process_turn(
 
     let llm_request = CompletionRequest::new(&intake_context.user_message)
         .with_system(intake_context.system_prompt.clone())
-        .with_max_tokens(if new_phase == IntakePhase::Recommendation {
+        .with_max_tokens(if new_phase == IntakePhase::Recommendation
+            || new_phase == IntakePhase::FollowUp {
             1024
         } else {
             400
@@ -503,7 +523,9 @@ pub async fn process_turn(
         }
     };
 
-    let complete = new_phase == IntakePhase::Recommendation;
+    // Session is never auto-completed — user can always ask follow-up questions.
+    // The frontend can offer a "done" button, or the user can close the tab.
+    let complete = false;
 
     let candidate_count = s
         .sessions
@@ -520,7 +542,9 @@ pub async fn process_turn(
         IntakePhase::ReviewOfSystems => "review_of_systems",
         IntakePhase::Differentiation => "differentiation",
         IntakePhase::CausationInquiry => "causation_inquiry",
+        IntakePhase::PreRecommendation => "pre_recommendation",
         IntakePhase::Recommendation => "recommendation",
+        IntakePhase::FollowUp => "follow_up",
     };
 
     // Look up PubMed citations for any candidate ingredients mentioned in the
@@ -741,7 +765,9 @@ fn phase_to_stage(phase: &IntakePhase) -> IntakeStageId {
         IntakePhase::ReviewOfSystems => IntakeStageId::SystemReview,
         IntakePhase::Differentiation => IntakeStageId::Differentiation,
         IntakePhase::CausationInquiry => IntakeStageId::CausationInquiry,
+        IntakePhase::PreRecommendation => IntakeStageId::PreRecommendation,
         IntakePhase::Recommendation => IntakeStageId::Recommendation,
+        IntakePhase::FollowUp => IntakeStageId::FollowUp,
     }
 }
 
@@ -752,7 +778,9 @@ fn stage_to_phase(stage: &IntakeStageId) -> IntakePhase {
         IntakeStageId::SystemReview => IntakePhase::ReviewOfSystems,
         IntakeStageId::Differentiation => IntakePhase::Differentiation,
         IntakeStageId::CausationInquiry => IntakePhase::CausationInquiry,
+        IntakeStageId::PreRecommendation => IntakePhase::PreRecommendation,
         IntakeStageId::Recommendation => IntakePhase::Recommendation,
+        IntakeStageId::FollowUp => IntakePhase::FollowUp,
     }
 }
 

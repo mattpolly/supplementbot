@@ -19,7 +19,9 @@ pub enum IntakeStageId {
     SystemReview,
     Differentiation,
     CausationInquiry,
+    PreRecommendation,
     Recommendation,
+    FollowUp,
 }
 
 impl IntakeStageId {
@@ -30,7 +32,9 @@ impl IntakeStageId {
             Self::SystemReview => "system_review",
             Self::Differentiation => "differentiation",
             Self::CausationInquiry => "causation_inquiry",
+            Self::PreRecommendation => "pre_recommendation",
             Self::Recommendation => "recommendation",
+            Self::FollowUp => "follow_up",
         }
     }
 }

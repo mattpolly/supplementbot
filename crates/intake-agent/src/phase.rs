@@ -44,9 +44,13 @@ pub fn evaluate_transition(
         user_signal,
     );
 
-    // Safety gate: before entering Recommendation, we MUST have asked about
-    // current medications and supplements. Interactions are safety-critical.
-    if candidate_phase == IntakePhase::Recommendation && !session.checklist.complete() {
+    // Safety gate: before entering PreRecommendation or Recommendation, we MUST
+    // have asked about current medications and supplements. Interactions are
+    // safety-critical.
+    if (candidate_phase == IntakePhase::PreRecommendation
+        || candidate_phase == IntakePhase::Recommendation)
+        && !session.checklist.complete()
+    {
         return session.phase.clone();
     }
 
@@ -61,6 +65,7 @@ fn evaluate_transition_inner(
 ) -> IntakePhase {
     // User explicitly wants recommendations or is done sharing → skip ahead,
     // but only if we actually have candidates to recommend.
+    // PreRecommendation is soft — skip it entirely if the user wants to move fast.
     if (*user_signal == UserSignal::WantsRecommendations
         || *user_signal == UserSignal::DoneSharing)
         && !session.candidates.is_empty()
@@ -69,8 +74,13 @@ fn evaluate_transition_inner(
     }
 
     // Confidence-based auto-recommend: if the top candidate is far ahead of #2,
-    // and we've gathered enough info (at least in HPI or later), go to recommendation.
-    if session.phase != IntakePhase::ChiefComplaint && session.candidates.len() >= 1 {
+    // and we've gathered enough info (at least in HPI or later), go to pre-recommendation.
+    if session.phase != IntakePhase::ChiefComplaint
+        && session.phase != IntakePhase::PreRecommendation
+        && session.phase != IntakePhase::Recommendation
+        && session.phase != IntakePhase::FollowUp
+        && session.candidates.len() >= 1
+    {
         let top = &session.candidates.candidates;
         let clear_winner = match top.len() {
             0 => false,
@@ -82,7 +92,7 @@ fn evaluate_transition_inner(
         };
         // Only auto-recommend if we've done some OLDCARTS and there's a clear winner
         if clear_winner && session.oldcarts.filled_count() >= 3 {
-            return IntakePhase::Recommendation;
+            return IntakePhase::PreRecommendation;
         }
     }
 
@@ -104,7 +114,7 @@ fn evaluate_transition_inner(
                 } else if !session.candidates.is_empty() && !differentiators.is_empty() {
                     IntakePhase::Differentiation
                 } else if !session.candidates.is_empty() {
-                    IntakePhase::Recommendation
+                    IntakePhase::PreRecommendation
                 } else {
                     IntakePhase::Hpi
                 }
@@ -118,7 +128,7 @@ fn evaluate_transition_inner(
                 if !differentiators.is_empty() {
                     IntakePhase::Differentiation
                 } else {
-                    IntakePhase::Recommendation
+                    IntakePhase::PreRecommendation
                 }
             } else {
                 IntakePhase::ReviewOfSystems
@@ -127,19 +137,35 @@ fn evaluate_transition_inner(
 
         IntakePhase::Differentiation => {
             if differentiators.is_empty() || *user_signal == UserSignal::Disengaged {
-                IntakePhase::Recommendation
+                IntakePhase::PreRecommendation
             } else {
                 IntakePhase::Differentiation
             }
         }
 
         IntakePhase::CausationInquiry => {
-            // Always move to recommendation after causation inquiry
-            IntakePhase::Recommendation
+            IntakePhase::PreRecommendation
+        }
+
+        IntakePhase::PreRecommendation => {
+            // PreRecommendation is soft — skip remaining questions if user
+            // signals impatience or disengagement. Read the room.
+            if session.pre_recommendation.complete()
+                || *user_signal == UserSignal::Disengaged
+            {
+                IntakePhase::Recommendation
+            } else {
+                IntakePhase::PreRecommendation
+            }
         }
 
         IntakePhase::Recommendation => {
-            IntakePhase::Recommendation
+            // After recommendation, move to follow-up so user can ask more
+            IntakePhase::FollowUp
+        }
+
+        IntakePhase::FollowUp => {
+            IntakePhase::FollowUp
         }
     }
 }
@@ -221,9 +247,10 @@ pub fn compute_lens_level(session: &IntakeSession) -> f64 {
     let reviewed = session.systems_reviewed.len();
     level += (reviewed as f64 * 0.03).min(0.15);
 
-    // Differentiation / CausationInquiry phase gets even higher
+    // Differentiation / CausationInquiry / PreRecommendation gets even higher
     if session.phase == IntakePhase::Differentiation
         || session.phase == IntakePhase::CausationInquiry
+        || session.phase == IntakePhase::PreRecommendation
     {
         level += 0.1;
     }
@@ -376,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn test_differentiation_to_recommendation_when_exhausted() {
+    fn test_differentiation_to_pre_recommendation_when_exhausted() {
         let mut session = empty_session();
         session.phase = IntakePhase::Differentiation;
         session.checklist.prescriptions_asked = true;
@@ -385,6 +412,45 @@ mod tests {
         session.checklist.contraindications_checked = true;
 
         let next = evaluate_transition(&session, &[], 0, &UserSignal::Normal);
+        // Differentiation flows to PreRecommendation (soft wrap-up questions)
+        assert_eq!(next, IntakePhase::PreRecommendation);
+    }
+
+    #[test]
+    fn test_pre_recommendation_skipped_when_user_wants_recommendations() {
+        use crate::candidates::{Candidate, CandidateSet};
+        use graph_service::source::EdgeQuality;
+        let mut session = empty_session();
+        session.phase = IntakePhase::PreRecommendation;
+        session.checklist.prescriptions_asked = true;
+        session.checklist.otc_and_supplements_asked = true;
+        session.checklist.health_conditions_asked = true;
+        session.checklist.contraindications_checked = true;
+        session.candidates = CandidateSet {
+            candidates: vec![Candidate {
+                ingredient: "quercetin".to_string(),
+                per_symptom_scores: HashMap::new(),
+                composite_score: 0.8,
+                supporting_paths: vec![],
+                quality: EdgeQuality::MultiProvider,
+                contraindications: vec![],
+            }],
+        };
+        // User says "just give me your recommendation" → skip PreRecommendation
+        let next = evaluate_transition(&session, &[], 0, &UserSignal::WantsRecommendations);
+        assert_eq!(next, IntakePhase::Recommendation);
+    }
+
+    #[test]
+    fn test_pre_recommendation_skipped_on_disengaged() {
+        let mut session = empty_session();
+        session.phase = IntakePhase::PreRecommendation;
+        session.checklist.prescriptions_asked = true;
+        session.checklist.otc_and_supplements_asked = true;
+        session.checklist.health_conditions_asked = true;
+        session.checklist.contraindications_checked = true;
+
+        let next = evaluate_transition(&session, &[], 0, &UserSignal::Disengaged);
         assert_eq!(next, IntakePhase::Recommendation);
     }
 }
