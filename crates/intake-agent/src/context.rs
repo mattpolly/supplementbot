@@ -206,12 +206,14 @@ pub fn build_context(
         let top = session.candidates.top(2);
         let names: Vec<&str> = top.iter().map(|c| c.ingredient.as_str()).collect();
         prompt.push_str(&format!(
-            "IMPORTANT — SHOW YOUR WORK BRIEFLY:\n\
-             Before asking your question, give the user a one-sentence peek at\n\
-             what you're currently considering. For example:\n\
-             \"Based on what you've described, I'm looking at {} as possibilities.\"\n\
-             Keep it to one sentence — then ask your question on the next line.\n\
-             This makes the person feel heard and shows the system is doing something useful.\n\n",
+            "CANDIDATE AWARENESS (vary your phrasing each turn — do NOT repeat the same opener):\n\
+             Weave a brief mention of what you're currently considering ({}) into your response.\n\
+             Use natural, varied language — never start two responses the same way. Some ideas:\n\
+             - Work it into the middle of your response rather than always leading with it\n\
+             - Reference it casually (\"things like...\", \"I'm thinking about...\", \"...which is \
+             making me lean toward...\")\n\
+             - Tie it to something the user just said rather than using a generic opener\n\
+             Keep it to one sentence max, then move on to your question.\n\n",
             names.join(" and ")
         ));
     }
@@ -412,12 +414,14 @@ pub fn build_context_v2(
         let top = session.candidates.top(2);
         let names: Vec<&str> = top.iter().map(|c| c.ingredient.as_str()).collect();
         prompt.push_str(&format!(
-            "IMPORTANT — SHOW YOUR WORK BRIEFLY:\n\
-             Before asking your question, give the user a one-sentence peek at\n\
-             what you're currently considering. For example:\n\
-             \"Based on what you've described, I'm looking at {} as possibilities.\"\n\
-             Keep it to one sentence — then ask your question on the next line.\n\
-             This makes the person feel heard and shows the system is doing something useful.\n\n",
+            "CANDIDATE AWARENESS (vary your phrasing each turn — do NOT repeat the same opener):\n\
+             Weave a brief mention of what you're currently considering ({}) into your response.\n\
+             Use natural, varied language — never start two responses the same way. Some ideas:\n\
+             - Work it into the middle of your response rather than always leading with it\n\
+             - Reference it casually (\"things like...\", \"I'm thinking about...\", \"...which is \
+             making me lean toward...\")\n\
+             - Tie it to something the user just said rather than using a generic opener\n\
+             Keep it to one sentence max, then move on to your question.\n\n",
             names.join(" and ")
         ));
     }

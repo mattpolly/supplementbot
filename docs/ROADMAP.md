@@ -505,3 +505,158 @@ Rather than depending on any single external KG, we build our own ingredient kno
 - **iDISK coverage**: 7,876 dietary supplement ingredients. All 19 test ingredients found. Rich synonym/common name data.
 - **SuppKG sentence coverage**: All 19 test ingredients found via sentence search. Coverage varies (probiotics: 8,519 PMIDs; theanine: 68 PMIDs) but every ingredient has at least some citations.
 - **Probiotics** remains the hardest ingredient across all sources because it's a category. Strategy: search for major strain families (Lactobacillus, Bifidobacterium, Saccharomyces) and aggregate under the "probiotics" umbrella.
+
+---
+
+## Long-Term Vision: Living Knowledge Base + Clinical Decision Support
+
+### The Problem with Existing Supplement Data
+
+Every external supplement database we evaluated (see `docs/RESOURCES.md`) is either paywalled
+(NatMed, ConsumerLab), deprecated (SemMedDB), frozen to a decades-old ontology snapshot (SuppKG's
+2006 UMLS), missing citations (iDISK), or updated only quarterly at best. No single source is
+comprehensive, current, and open. We spent significant effort cobbling together data from SuppKG,
+iDISK, CTD, UMLS API, and others — and still had to build custom workarounds (sentence-based
+mining) to get basic citation coverage for 19 ingredients.
+
+### The Goal: Build Our Own
+
+Rather than depending on stale external datasets, build a continuously-updated, agentic supplement
+knowledge base that we control. The knowledge base becomes the single source of truth, aggregating
+and validating evidence from multiple streams.
+
+### Phase 5: General Ingredient Summaries (Fallback Layer)
+
+When the citation pipeline can't find a relevant PubMed citation for a specific symptom, display
+a general ingredient summary instead of showing irrelevant citations.
+
+- Aggregate from public domain sources (NIH ODS, PubChem) and CC BY-SA sources (Wikipedia)
+- Fetch at training time, store per-ingredient summaries in DB
+- LLM-distill raw content into consistent 2-4 sentence summaries
+- Tiered display: relevant citation → general summary fallback → best-available citation
+- See `docs/RESOURCES.md` for the full source evaluation and coverage matrix
+
+### Phase 6: Agentic Knowledge Base Maintenance
+
+The knowledge base is maintained by AI agents, not manual curation:
+
+- **Extraction agents** scrape and parse new data from PubMed, journals, and adverse event
+  databases daily
+- **Validation agents** independently evaluate each new finding — claim extraction, evidence
+  quality assessment, relevance scoring
+- **Integration agents** resolve conflicts, update the graph, and maintain citation provenance
+
+### Phase 7: MoE (Mixture of Experts) LLM Validation
+
+No single LLM should be trusted to evaluate clinical evidence alone. Every new finding passes
+through multiple models (Claude, Gemini, Grok, etc.) independently:
+
+- Each model extracts claims, assesses evidence quality, and flags concerns
+- Agreement across models → auto-integrate with high confidence
+- Disagreement → flag for human review
+- This extends the existing multi-provider extraction infrastructure and provider agreement
+  tracking in the source layer
+- Effectively a computational peer review process
+
+### Phase 8: Continuous Monitoring Pipeline
+
+Daily monitoring of multiple evidence streams:
+
+| Source | What we watch for | Update frequency |
+|---|---|---|
+| PubMed E-utilities | New papers per ingredient (name + MeSH term searches) | Daily |
+| FDA CAERS | Supplement adverse event reports | Daily (public download) |
+| WHO VigiBase | International adverse reaction reports | As available |
+| Journal RSS feeds | Targeted nutrition/supplement/pharmacology journals | Daily |
+| CTD | Curated chemical-disease association updates | Monthly |
+| NIH ODS | Fact sheet revisions | Quarterly check |
+
+New findings enter the MoE validation pipeline before touching the knowledge base. The goal is
+that no published supplement evidence is more than 24-48 hours from entering our system.
+
+### Phase 9: Contraindication and Safety Layer
+
+Before supplement recommendations can be patient-specific, we need comprehensive interaction data:
+
+- **Drug-supplement interactions** from CTD and DrugBank (open-access XML dump)
+- **Condition contraindications** — when a supplement is harmful given a specific diagnosis
+- **Lab-value thresholds** — e.g., don't recommend potassium if serum K+ is already elevated
+- **Allergy cross-reactivity** — botanical family relationships for allergy checking
+- All interaction data backed by citations with the same evidence quality tiers
+
+### Phase 10: SMART on FHIR Clinical Decision Support App
+
+The endgame. A SMART on FHIR app that:
+
+1. **Ingests** a patient's full medical record via FHIR resources: Patient, Condition,
+   MedicationStatement, AllergyIntolerance, Observation (labs), Procedure
+2. **Reasons** about supplement recommendations using graph traversal
+   (Symptom → System ← Ingredient), filtered through the patient's specific context
+3. **Filters** against contraindications: current medications (drug-supplement interactions),
+   active conditions, allergies, and abnormal lab values
+4. **Presents** the physician with traced, fully-cited recommendations — every suggestion
+   links back to the graph traversal path that justified it and the PubMed citations that
+   support each edge
+5. **Explains** why alternatives were excluded (contraindicated given medication X, insufficient
+   evidence for condition Y)
+6. **Updates** continuously — when new evidence enters the knowledge base, recommendations
+   for affected patients are automatically re-evaluated
+
+### Strategic Framing: Complementary, Not Replacement
+
+The system is positioned as **complementary to pharmaceutical care**, not a replacement for it.
+This is both the defensible clinical position and the correct strategic framing.
+
+**Why complementary-first:**
+- Physicians won't adopt a tool that suggests patients stop medications
+- Health systems and insurers won't integrate an app that increases liability
+- FDA/FTC scrutiny is lower for "supports alongside" than "use instead of"
+- The evidence base is actually stronger for adjunctive use — most supplement RCTs study
+  supplements *alongside* standard care, not instead of it
+- The graph already works this way: it says "this ingredient acts on this system via this
+  mechanism," not "replace drug X with supplement Y"
+
+**Drug-supplement synergies are a real clinical feature, not just positioning:**
+- Vitamin D improves calcium absorption from bisphosphonates
+- CoQ10 mitigates statin-induced myopathy (a well-documented side effect)
+- Magnesium enhances efficacy of certain antihypertensives
+- Fish oil complements antiplatelet therapy in cardiovascular risk reduction
+- These are modeled as real edges in the graph: `Ingredient → synergizes_with → Drug` or
+  `Ingredient → mitigates_side_effect → Drug`
+
+**New edge types for pharmaceutical integration:**
+- `complements` — supplement enhances drug efficacy or supports the same therapeutic goal
+- `mitigates_side_effect_of` — supplement addresses a known adverse effect of a drug
+- `contraindicated_with` — supplement is unsafe in combination with a drug (safety-critical)
+- `shares_mechanism_with` — supplement and drug act on the same pathway (informational,
+  helps physicians understand overlap and potential for dose adjustment)
+
+**What the app surfaces to physicians:**
+- "Patient is on atorvastatin. CoQ10 may help with statin-associated muscle symptoms.
+  [3 citations]"
+- "Patient is on metformin. Metformin depletes B12 over time. Consider monitoring levels.
+  [2 citations]"
+- "Patient is on warfarin. Fish oil has additive anticoagulant effects — flag for review.
+  [contraindication, 4 citations]"
+
+**The long game:** As evidence accumulates for specific ingredients in specific contexts, the
+data speaks for itself. A physician seeing improved inflammation markers after adding curcumin
+alongside an NSAID doesn't need the app to tell them what that means. The system surfaces
+evidence honestly and lets clinicians draw conclusions. Some pharmaceuticals are irreplaceable
+(insulin for T1D, for example) — the system respects that by never recommending *against* a
+medication, only *alongside* or *in addition to*. Where natural alternatives have equivalent
+evidence for a given patient context, that evidence is simply visible in the citations. The
+physician decides.
+
+### Design Principles (All Phases)
+
+- **Agentic maintainability over manual curation** — humans review edge cases, agents do the
+  volume work
+- **Multi-model consensus over single-model extraction** — no finding enters the KB on one
+  model's word alone
+- **Patient-specific reasoning over generic recommendations** — the graph traversal + FHIR
+  context is the differentiator
+- **Cited evidence over unsupported claims** — every user-facing assertion traces to a source
+- **Safety-first** — contraindications and adverse reactions are first-class concerns, not
+  afterthoughts
+- **Relevance, proof, and safety** — the three pillars of every recommendation
