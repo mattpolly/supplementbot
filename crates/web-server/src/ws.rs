@@ -312,7 +312,7 @@ async fn generate_opening(state: &AppState, session_id: &Uuid) -> Option<TurnRes
         }
     };
 
-    let safe_response = match s.safety_filter.check(&response) {
+    let safe_response = match s.safety_filter.check(&response, &[]) {
         intake_agent::safety::FilterResult::Pass(text) => text,
         _ => "Hello! Welcome. What brings you in today?".to_string(),
     };

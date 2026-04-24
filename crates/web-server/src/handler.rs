@@ -503,7 +503,18 @@ pub async fn process_turn(
     };
 
     // Step 10: Post-generation safety filter
-    let safe_response = match s.safety_filter.check(&llm_response) {
+    // Permitted = top-5 candidate names for this session — the same list
+    // injected into the system prompt. Any ingredient outside this list
+    // that appears in the response is a hallucination and must be blocked.
+    let permitted_candidates: Vec<String> = s
+        .sessions
+        .with_session(session_id, |session| {
+            session.candidates.top(5).iter().map(|c| c.ingredient.clone()).collect()
+        })
+        .await
+        .unwrap_or_default();
+
+    let safe_response = match s.safety_filter.check(&llm_response, &permitted_candidates) {
         FilterResult::Pass(text) => text,
         FilterResult::Rewrite {
             original: _,

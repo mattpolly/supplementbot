@@ -132,7 +132,10 @@ impl AppState {
             session_timeout_secs,
         );
 
-        let safety_filter = SafetyFilter::new();
+        let ingredient_names_path = std::env::var("INGREDIENT_NAMES_PATH").ok();
+        let safety_filter = SafetyFilter::new(
+            ingredient_names_path.as_deref().map(Path::new)
+        );
 
         let node_count = graph.node_count().await;
         let edge_count = graph.edge_count().await;
