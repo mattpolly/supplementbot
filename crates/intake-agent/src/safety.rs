@@ -199,10 +199,16 @@ impl SafetyFilter {
                 .filter(|w| !w.is_empty())
                 .collect();
 
-            // Check unigrams, bigrams, and trigrams
+            // Check unigrams, bigrams, and trigrams.
+            // Unigrams must be at least 5 chars to avoid false-positives on
+            // common English words that appear in the supplement terms list
+            // (e.g. "also", "base", "ash", "bay", "ace", "bean").
             for window_size in 1..=3usize {
                 for window in words.windows(window_size) {
                     let ngram = window.join(" ").to_lowercase();
+                    if window_size == 1 && ngram.len() < 5 {
+                        continue;
+                    }
                     if self.known_ingredient_names.contains(&ngram)
                         && !permitted_lower.contains(&ngram)
                     {
