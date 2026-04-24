@@ -51,6 +51,10 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(900); // 15 minutes
+    let ip_daily_cap: usize = std::env::var("IP_DAILY_SESSION_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3); // max 3 sessions per IP per day
     let idisk_data_dir = std::env::var("IDISK_DATA_DIR").ok();
     let suppkg_path = std::env::var("SUPPKG_PATH").ok();
 
@@ -63,7 +67,7 @@ async fn main() {
     if let Some(ref p) = suppkg_path {
         eprintln!("  SuppKG: {p}");
     }
-    eprintln!("  limits: {max_concurrent} concurrent, {daily_cap}/day, {monthly_cap}/month");
+    eprintln!("  limits: {max_concurrent} concurrent, {daily_cap}/day, {monthly_cap}/month, {ip_daily_cap}/IP/day");
     eprintln!("  session timeout: {session_timeout_secs}s");
 
     // -- Initialize shared state --
@@ -77,6 +81,7 @@ async fn main() {
         daily_cap,
         monthly_cap,
         session_timeout_secs,
+        ip_daily_cap,
     )
     .await;
 
@@ -128,7 +133,9 @@ async fn main() {
     eprintln!("  listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+        .unwrap();
 }
 
 fn dirs_home() -> PathBuf {

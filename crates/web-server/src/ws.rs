@@ -1,11 +1,18 @@
+use std::net::SocketAddr;
+
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Query, State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, Query, State, WebSocketUpgrade};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::handler::{self, CitationRef, TurnResult};
 use crate::state::AppState;
+
+/// Maximum bytes accepted from a single user message. Messages exceeding this
+/// are truncated before reaching the extractor — prevents context-stuffing and
+/// runaway token spend on adversarial inputs.
+const MAX_INPUT_BYTES: usize = 2048;
 
 #[derive(Deserialize, Default)]
 pub struct WsQuery {
@@ -160,8 +167,10 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<WsQuery>,
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, query.donor))
+    let peer_ip = Some(addr.ip());
+    ws.on_upgrade(move |socket| handle_socket(socket, state, query.donor, peer_ip))
 }
 
 /// Handle one WebSocket connection.
@@ -169,9 +178,9 @@ pub async fn ws_handler(
 /// Session is created on connect so the opening greeting fires immediately.
 /// The denied check happens at connect time — capacity-limited connections
 /// are rejected before the user types anything.
-async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
+async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool, peer_ip: Option<std::net::IpAddr>) {
     // Create the session immediately so we can send the opening greeting.
-    let session_id = match state.inner.sessions.create_session(donor).await {
+    let session_id = match state.inner.sessions.create_session(donor, peer_ip).await {
         Ok(id) => id,
         Err(denied) => {
             let _ = send_json(&mut socket, &ServerMessage::denied(&denied.to_string())).await;
@@ -212,13 +221,21 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
                     continue;
                 }
 
+                // Truncate oversized input before any LLM sees it.
+                let user_text: String = if client_msg.text.len() > MAX_INPUT_BYTES {
+                    eprintln!("[ws] session {session_id} — input truncated ({} bytes)", client_msg.text.len());
+                    client_msg.text.chars().take(MAX_INPUT_BYTES).collect()
+                } else {
+                    client_msg.text.clone()
+                };
+
                 let sid = session_id;
 
                 // Send typing indicator
                 let _ = send_json(&mut socket, &ServerMessage::typing()).await;
 
                 // Intercept "what supplements do you know about?" before the intake handler.
-                if is_asking_about_known_supplements(&client_msg.text) {
+                if is_asking_about_known_supplements(&user_text) {
                     let ingredients = state.inner.graph.known_ingredients().await;
                     let reply = if ingredients.is_empty() {
                         "I haven't been trained on any specific supplements yet — my knowledge graph is still being built.".to_string()
@@ -245,7 +262,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, donor: bool) {
                 }
 
                 // Process the turn
-                match handler::process_turn(&state, &sid, &client_msg.text).await {
+                match handler::process_turn(&state, &sid, &user_text).await {
                     Some(result) => {
                         let complete = result.complete;
                         let _ = send_json(&mut socket, &ServerMessage::from_turn(&result)).await;

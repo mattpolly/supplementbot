@@ -63,6 +63,7 @@ impl AppState {
         daily_cap: usize,
         monthly_cap: usize,
         session_timeout_secs: u64,
+        ip_daily_cap: usize,
     ) -> Self {
         // Connect to SurrealDB server
         let graph = KnowledgeGraph::open(db_url, db_user, db_pass)
@@ -130,6 +131,7 @@ impl AppState {
             daily_cap,
             monthly_cap,
             session_timeout_secs,
+            ip_daily_cap,
         );
 
         let ingredient_names_path = std::env::var("INGREDIENT_NAMES_PATH").ok();

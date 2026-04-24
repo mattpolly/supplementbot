@@ -13,7 +13,7 @@ use intake_agent::safety::{self, FilterResult, SafetyCheck};
 use intake_agent::session::IntakePhase;
 use llm_client::provider::CompletionRequest;
 
-use crate::extract::{apply_extraction, extract_from_message, to_user_signal};
+use crate::extract::{apply_extraction, extract_from_message, to_user_signal, EngagementLevel};
 use crate::state::AppState;
 use crate::symptom_resolver;
 
@@ -22,6 +22,7 @@ use crate::symptom_resolver;
 //
 // The intake KG engine decides what to ask. The LLM renders it naturally.
 //
+//   0. Abuse guards (turn limit, suspicion scoring)
 //   1. Red flag check
 //   2. Extract structured data (cheap model)
 //   3. Record turn + apply extraction to session
@@ -33,6 +34,17 @@ use crate::symptom_resolver;
 //   9. Build context v2 + call renderer LLM
 //  10. Post-generation safety filter
 // ---------------------------------------------------------------------------
+
+/// Hard cap on total user turns per session. After this many turns the session
+/// is closed gracefully regardless of phase. Prevents unbounded token spend
+/// from stuck conversations or automated clients.
+const MAX_TURNS_PER_SESSION: usize = 30;
+
+/// How many consecutive turns with no extractable clinical signal before we
+/// warn the user. Two warnings, then close on the third.
+const OFF_TOPIC_WARN_THRESHOLD: usize = 2;
+/// Close the session after this many consecutive off-topic turns.
+const OFF_TOPIC_CLOSE_THRESHOLD: usize = 3;
 
 /// A single PubMed citation to surface in the UI.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -71,6 +83,38 @@ pub async fn process_turn(
 ) -> Option<TurnResult> {
     let s = &state.inner;
 
+    // Step 0: Abuse guards — checked before any LLM call.
+    //
+    // (a) Hard turn limit — close gracefully once MAX_TURNS_PER_SESSION user
+    //     turns have been processed, regardless of phase.
+    // (b) Off-topic suspicion — if the extractor finds no clinical signal for
+    //     OFF_TOPIC_WARN_THRESHOLD consecutive turns, warn the user; close on
+    //     the third consecutive empty turn.
+    //
+    // Both counts live on the session so they survive across the async boundary.
+    let (turn_limit_hit, _off_topic_count) = s
+        .sessions
+        .with_session(session_id, |session| {
+            session.total_user_turns += 1;
+            (session.total_user_turns > MAX_TURNS_PER_SESSION, session.off_topic_turns)
+        })
+        .await
+        .unwrap_or((false, 0));
+
+    if turn_limit_hit {
+        eprintln!("[session {session_id}] turn limit hit — closing session");
+        s.sessions.remove_session(session_id).await;
+        return Some(TurnResult {
+            response: "We've covered a lot of ground together! For the best results, please start a new session if you have additional questions.".to_string(),
+            phase: "follow_up".to_string(),
+            emergency: false,
+            complete: true,
+            candidate_count: 0,
+            citations: vec![],
+            debug_llm_prompt: None,
+        });
+    }
+
     // Step 1: Red flag check (no LLM, no graph)
     if let SafetyCheck::EmergencyExit(flag) = safety::check_red_flags(user_message) {
         eprintln!("[session {session_id}] RED FLAG: {flag}");
@@ -104,6 +148,94 @@ pub async fn process_turn(
         extraction.denied_systems,
         extraction.engagement,
     );
+
+    // Step 2b: Suspicion scoring — check whether this turn carried clinical signal.
+    // "Signal" = any extracted symptom, body system, OLDCARTS field, medication,
+    // denied system, or user engagement cue. Pure off-topic chatter yields nothing.
+    let has_signal = !extraction.symptoms.is_empty()
+        || !extraction.systems.is_empty()
+        || !extraction.denied_systems.is_empty()
+        || !extraction.medications.is_empty()
+        || extraction.oldcarts.onset.is_some()
+        || extraction.oldcarts.location.is_some()
+        || extraction.oldcarts.duration.is_some()
+        || extraction.oldcarts.character.is_some()
+        || extraction.oldcarts.severity.is_some()
+        || !extraction.oldcarts.aggravating.is_empty()
+        || !extraction.oldcarts.alleviating.is_empty()
+        || extraction.is_correction
+        || extraction.engagement != EngagementLevel::Normal;
+
+    let current_off_topic = s
+        .sessions
+        .with_session(session_id, |session| {
+            if has_signal {
+                session.off_topic_turns = 0;
+            } else {
+                session.off_topic_turns += 1;
+            }
+            session.off_topic_turns
+        })
+        .await
+        .unwrap_or(0);
+
+    if current_off_topic >= OFF_TOPIC_CLOSE_THRESHOLD {
+        eprintln!("[session {session_id}] off-topic threshold reached — closing session");
+        s.sessions.remove_session(session_id).await;
+        return Some(TurnResult {
+            response: "It looks like we've drifted away from supplement questions. I'm going to close this session — feel free to start a new one whenever you're ready to discuss your health concerns.".to_string(),
+            phase: "follow_up".to_string(),
+            emergency: false,
+            complete: true,
+            candidate_count: 0,
+            citations: vec![],
+            debug_llm_prompt: None,
+        });
+    } else if current_off_topic == OFF_TOPIC_WARN_THRESHOLD {
+        eprintln!("[session {session_id}] off-topic warning #{current_off_topic}");
+        return Some(TurnResult {
+            response: "I want to make sure I'm being helpful — I'm designed to assist with supplement questions based on your symptoms. One more message I can't connect to health topics and I'll need to close the session. What symptoms or concerns can I help you with?".to_string(),
+            phase: s.sessions.with_session(session_id, |session| {
+                match session.phase {
+                    intake_agent::session::IntakePhase::ChiefComplaint => "chief_complaint",
+                    intake_agent::session::IntakePhase::Hpi => "hpi",
+                    intake_agent::session::IntakePhase::ReviewOfSystems => "review_of_systems",
+                    intake_agent::session::IntakePhase::Differentiation => "differentiation",
+                    intake_agent::session::IntakePhase::CausationInquiry => "causation_inquiry",
+                    intake_agent::session::IntakePhase::PreRecommendation => "pre_recommendation",
+                    intake_agent::session::IntakePhase::Recommendation => "recommendation",
+                    intake_agent::session::IntakePhase::FollowUp => "follow_up",
+                }.to_string()
+            }).await.unwrap_or_else(|| "chief_complaint".to_string()),
+            emergency: false,
+            complete: false,
+            candidate_count: 0,
+            citations: vec![],
+            debug_llm_prompt: None,
+        });
+    } else if current_off_topic == 1 && !has_signal {
+        eprintln!("[session {session_id}] off-topic warning #1");
+        return Some(TurnResult {
+            response: "I didn't quite catch any health-related details in that — I'm here to help with supplement questions. Could you tell me more about the symptoms or concerns you're experiencing?".to_string(),
+            phase: s.sessions.with_session(session_id, |session| {
+                match session.phase {
+                    intake_agent::session::IntakePhase::ChiefComplaint => "chief_complaint",
+                    intake_agent::session::IntakePhase::Hpi => "hpi",
+                    intake_agent::session::IntakePhase::ReviewOfSystems => "review_of_systems",
+                    intake_agent::session::IntakePhase::Differentiation => "differentiation",
+                    intake_agent::session::IntakePhase::CausationInquiry => "causation_inquiry",
+                    intake_agent::session::IntakePhase::PreRecommendation => "pre_recommendation",
+                    intake_agent::session::IntakePhase::Recommendation => "recommendation",
+                    intake_agent::session::IntakePhase::FollowUp => "follow_up",
+                }.to_string()
+            }).await.unwrap_or_else(|| "chief_complaint".to_string()),
+            emergency: false,
+            complete: false,
+            candidate_count: 0,
+            citations: vec![],
+            debug_llm_prompt: None,
+        });
+    }
 
     // Step 3: Record user turn + apply extraction to session
     s.sessions

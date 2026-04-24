@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,10 @@ pub struct SessionManager {
     /// Wall-clock day/month markers for detecting rollovers
     current_day: RwLock<u32>,   // day-of-month (1–31)
     current_month: RwLock<u32>, // month (1–12)
+    /// Per-IP daily session counts (resets with the global daily counter).
+    ip_daily: RwLock<HashMap<IpAddr, usize>>,
+    /// Max sessions a single IP may open per day (0 = unlimited).
+    ip_daily_cap: usize,
 }
 
 /// Why a session could not be created.
@@ -42,6 +47,7 @@ pub enum SessionDenied {
     AtCapacity,
     DailyLimitReached,
     MonthlyLimitReached,
+    IpDailyLimitReached,
 }
 
 impl std::fmt::Display for SessionDenied {
@@ -59,6 +65,10 @@ impl std::fmt::Display for SessionDenied {
                 f,
                 "Free sessions for this month have been used up. Please come back next month."
             ),
+            SessionDenied::IpDailyLimitReached => write!(
+                f,
+                "You've reached your daily session limit. Please come back tomorrow."
+            ),
         }
     }
 }
@@ -69,6 +79,7 @@ impl SessionManager {
         daily_cap: usize,
         monthly_cap: usize,
         session_timeout_secs: u64,
+        ip_daily_cap: usize,
     ) -> Self {
         let now = Local::now();
         Self {
@@ -81,12 +92,14 @@ impl SessionManager {
             monthly_count: AtomicUsize::new(0),
             current_day: RwLock::new(now.day()),
             current_month: RwLock::new(now.month()),
+            ip_daily: RwLock::new(HashMap::new()),
+            ip_daily_cap,
         }
     }
 
     /// Try to create a new session. Returns the session ID or a denial reason.
     /// Donors bypass all caps as a thank-you for supporting the project.
-    pub async fn create_session(&self, donor: bool) -> Result<Uuid, SessionDenied> {
+    pub async fn create_session(&self, donor: bool, peer_ip: Option<IpAddr>) -> Result<Uuid, SessionDenied> {
         self.maybe_reset_counters().await;
 
         if !donor {
@@ -98,6 +111,17 @@ impl SessionManager {
             // Check daily cap
             if self.daily_count.load(Ordering::Relaxed) >= self.daily_cap {
                 return Err(SessionDenied::DailyLimitReached);
+            }
+
+            // Per-IP daily cap (if configured and IP is known)
+            if self.ip_daily_cap > 0 {
+                if let Some(ip) = peer_ip {
+                    let ip_map = self.ip_daily.read().await;
+                    if ip_map.get(&ip).copied().unwrap_or(0) >= self.ip_daily_cap {
+                        eprintln!("[session_mgr] IP daily cap hit: {ip}");
+                        return Err(SessionDenied::IpDailyLimitReached);
+                    }
+                }
             }
 
             // Reap timed-out sessions before checking the concurrent limit,
@@ -124,6 +148,13 @@ impl SessionManager {
         self.sessions.write().await.insert(id, managed);
         self.daily_count.fetch_add(1, Ordering::Relaxed);
         self.monthly_count.fetch_add(1, Ordering::Relaxed);
+
+        // Track per-IP count
+        if !donor {
+            if let Some(ip) = peer_ip {
+                *self.ip_daily.write().await.entry(ip).or_insert(0) += 1;
+            }
+        }
 
         Ok(id)
     }
@@ -183,6 +214,7 @@ impl SessionManager {
             if current != today {
                 self.daily_count.store(0, Ordering::Relaxed);
                 *self.current_day.write().await = today;
+                self.ip_daily.write().await.clear();
                 eprintln!("[session_mgr] daily counter reset (new day: {today})");
             }
         }

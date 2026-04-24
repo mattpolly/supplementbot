@@ -270,6 +270,12 @@ pub struct IntakeSession {
     pub differentiation_turns: usize,
     /// Tracks pre-recommendation wrap-up questions.
     pub pre_recommendation: PreRecommendationState,
+    /// Total user turns in this session (for hard turn-count cap).
+    pub total_user_turns: usize,
+    /// Consecutive turns where extraction found no useful clinical signal
+    /// (no symptoms, systems, OLDCARTS, medications, or corrections).
+    /// Resets to 0 on any turn that yields signal.
+    pub off_topic_turns: usize,
 }
 
 impl IntakeSession {
@@ -294,6 +300,8 @@ impl IntakeSession {
             last_differentiator_count: 0,
             differentiation_turns: 0,
             pre_recommendation: PreRecommendationState::default(),
+            total_user_turns: 0,
+            off_topic_turns: 0,
         }
     }
 
