@@ -400,6 +400,44 @@ pub fn build_context_v2(
         prompt.push('\n');
     }
 
+    // --- Already-asked OLDCARTS dimensions — do NOT repeat these ---
+    // This prevents the LLM from going off-script and re-asking questions
+    // the engine already covered, even when turn_action.question is None.
+    let already_covered: Vec<&str> = {
+        let mut covered = Vec::new();
+        if session.oldcarts.onset.is_some() { covered.push("onset (when it started)"); }
+        if session.oldcarts.location.is_some() { covered.push("location (where)"); }
+        if session.oldcarts.duration.is_some() { covered.push("duration (how long)"); }
+        if session.oldcarts.character.is_some() { covered.push("character (what it feels like)"); }
+        if !session.oldcarts.aggravating.is_empty() { covered.push("aggravating factors"); }
+        if !session.oldcarts.alleviating.is_empty() { covered.push("alleviating factors"); }
+        if session.oldcarts.radiation.is_some() { covered.push("radiation (spread)"); }
+        if session.oldcarts.timing.is_some() { covered.push("timing (pattern)"); }
+        if session.oldcarts.severity.is_some() { covered.push("severity (1-10 scale)"); }
+        covered
+    };
+    if !already_covered.is_empty() {
+        prompt.push_str("ALREADY COVERED — DO NOT ASK AGAIN:\n");
+        for item in &already_covered {
+            prompt.push_str(&format!("  - {}\n", item));
+        }
+        prompt.push_str("Do not re-ask about any of the above, even indirectly.\n\n");
+    }
+
+    // --- Safety checklist reminder (suppressed once recommendation is delivered) ---
+    let past_recommendation = matches!(
+        session.phase,
+        IntakePhase::Recommendation | IntakePhase::FollowUp
+    );
+    if !session.checklist.complete() && !session.candidates.is_empty() && !past_recommendation {
+        prompt.push_str(
+            "IMPORTANT — SAFETY CHECKLIST NOT YET COMPLETE:\n\
+             Before making any recommendations, you MUST complete all required safety questions\n\
+             (prescriptions, OTC medications/supplements, health conditions, contraindication check).\n\
+             This is safety-critical for identifying potential interactions.\n\n",
+        );
+    }
+
     // --- THE GRAPH-DRIVEN TASK (replaces hardcoded "YOUR TASK THIS TURN") ---
     prompt.push_str("YOUR TASK THIS TURN:\n");
 
@@ -508,12 +546,15 @@ pub fn build_context_v2(
                     ));
                 }
                 prompt.push_str(
-                    "The user may have follow-up questions about your recommendations,\n\
-                     want to explore a different symptom, or ask about a specific supplement.\n\
-                     Answer naturally based on the session context. Continue to use affordance\n\
-                     language (\"may support\", \"research suggests\"). If they bring up a new\n\
-                     symptom, discuss how it relates to what you've already covered.\n\
-                     If the user seems done, let them know they can come back anytime.\n",
+                    "The recommendation has already been delivered. Do NOT ask any more\n\
+                     intake or safety questions — those are complete.\n\
+                     If the user signals they are done (e.g. \"thanks\", \"great\", \"no\",\n\
+                     \"that's all\", \"no thanks\"), close warmly and let them know they can\n\
+                     come back anytime. Do not ask another question.\n\
+                     If they have a genuine follow-up question about a recommendation,\n\
+                     answer it naturally using affordance language (\"may support\",\n\
+                     \"research suggests\"). Do not introduce new supplements beyond\n\
+                     the permitted list above.\n",
                 );
             }
             _ => {
