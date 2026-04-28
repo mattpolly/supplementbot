@@ -64,6 +64,7 @@ struct ServerMessage {
 }
 
 impl ServerMessage {
+    #[allow(dead_code)]
     fn ready() -> Self {
         Self {
             msg_type: "ready".to_string(),

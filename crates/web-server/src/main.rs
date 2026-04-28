@@ -7,7 +7,6 @@ mod symptom_resolver;
 mod ws;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
 use axum::routing::get;
 use axum::Router;
@@ -138,8 +137,3 @@ async fn main() {
         .unwrap();
 }
 
-fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-}

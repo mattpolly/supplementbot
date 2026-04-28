@@ -44,6 +44,7 @@ pub struct AppStateInner {
     pub idisk: IdiskImporter,
     /// SuppKG — in-memory citation index (PubMed PMIDs + sentences).
     /// None if SUPPKG_PATH is not set or file not found.
+    #[allow(dead_code)]
     pub suppkg: Option<Arc<SuppKg>>,
     /// Coverage strength per symptom archetype, sorted Strong → Moderate → Weak.
     /// Cached at startup for use in the opening greeting.
