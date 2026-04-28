@@ -10,7 +10,6 @@ use graph_service::query::{ArchetypeCoverage, QueryEngine};
 use graph_service::source::SourceStore;
 use intake_agent::safety::SafetyFilter;
 use llm_client::provider::LlmProvider;
-use suppkg::SuppKg;
 
 use crate::session_mgr::SessionManager;
 
@@ -42,10 +41,6 @@ pub struct AppStateInner {
     pub intake_store: IntakeGraphStore,
     /// iDISK importer (drug interactions, adverse reactions, mechanisms).
     pub idisk: IdiskImporter,
-    /// SuppKG — in-memory citation index (PubMed PMIDs + sentences).
-    /// None if SUPPKG_PATH is not set or file not found.
-    #[allow(dead_code)]
-    pub suppkg: Option<Arc<SuppKg>>,
     /// Coverage strength per symptom archetype, sorted Strong → Moderate → Weak.
     /// Cached at startup for use in the opening greeting.
     pub archetype_coverage: Vec<ArchetypeCoverage>,
@@ -103,25 +98,16 @@ impl AppState {
             }
         }
 
-        // Load SuppKG citation index if path is provided
-        let suppkg = suppkg_path.and_then(|p| {
+        // SuppKG is accessed directly by the nsai-loop, not stored in AppState.
+        // Log availability at startup for diagnostics only.
+        if let Some(p) = suppkg_path {
             let path = Path::new(p);
             if path.exists() {
-                match SuppKg::load(p) {
-                    Ok(kg) => {
-                        eprintln!("  SuppKG loaded: {} nodes, {} edge pairs", kg.node_count(), kg.edge_pair_count());
-                        Some(Arc::new(kg))
-                    }
-                    Err(e) => {
-                        eprintln!("  SuppKG load failed: {e}");
-                        None
-                    }
-                }
+                eprintln!("  SuppKG: {p} (available for nsai-loop)");
             } else {
                 eprintln!("  SuppKG path not found: {p} — citations unavailable");
-                None
             }
-        });
+        }
 
         // Configure LLM providers from environment
         let renderer = build_renderer();
@@ -183,7 +169,6 @@ impl AppState {
                 safety_filter,
                 intake_store,
                 idisk,
-                suppkg,
                 archetype_coverage,
                 debug_llm_prompt,
             }),

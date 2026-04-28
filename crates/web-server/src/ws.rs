@@ -64,21 +64,6 @@ struct ServerMessage {
 }
 
 impl ServerMessage {
-    #[allow(dead_code)]
-    fn ready() -> Self {
-        Self {
-            msg_type: "ready".to_string(),
-            session_id: None,
-            text: None,
-            phase: None,
-            message: None,
-            complete: None,
-            candidate_count: None,
-            citations: vec![],
-            debug_llm_prompt: None,
-        }
-    }
-
     fn welcome(session_id: &Uuid) -> Self {
         Self {
             msg_type: "welcome".to_string(),
