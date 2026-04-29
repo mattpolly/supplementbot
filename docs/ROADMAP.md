@@ -57,6 +57,59 @@ When the graph contains both a simple 5th-grade edge and a detailed graduate-lev
 
 See also: CONCERNS.md §6 for the full problem statement and escape hatches.
 
+## Evidence-Gated Edge Confirmation (Phase 8)
+
+See `/srv/www/supplementology/docs/EVIDENCE_GATED_EDGES.md` for the full design.
+
+### The problem
+NSAI loop edges are LLM predictions. They're good for consumer explanation but have
+no guaranteed evidence backing. A user seeing "magnesium helps muscle cramps" can't
+tell if that's backed by 12 RCTs or just LLM pattern matching.
+
+### The design
+Every edge gets a `confirmation_status` field:
+- `unconfirmed` — LLM extracted, no citation found (default for all current edges)
+- `confirmed` — matched to ≥1 supplementology evidence_claim with a real citation
+- `contradicted` — supplementology has counter-evidence; near-zero confidence weight
+
+**Unconfirmed edges are not removed.** The mechanism explanation layer (calcium
+channel blocking → muscle relaxation) is valuable even without a direct RCT. The
+lens system and query engine use confirmation status to weight results, not filter them.
+
+### Schema changes needed (SurrealDB)
+
+```rust
+// Add to edge records in graph-service
+pub confirmation_status: ConfirmationStatus,  // default: Unconfirmed
+pub citation_pmids: Vec<String>,              // populated by confirmation pass
+pub confirmation_source: Option<String>,       // "ctd" | "pubmed_trials" | "idisk"
+
+pub enum ConfirmationStatus {
+    Unconfirmed,
+    Confirmed,
+    Contradicted,
+}
+```
+
+### Query engine changes
+
+Add confirmation multiplier to path scoring:
+
+```
+all edges confirmed   → ×1.0
+some edges confirmed  → ×0.85
+no edges confirmed    → ×0.65  (LLM-only path)
+any edge contradicted → ×0.1   (supplementology disagrees)
+```
+
+### Implementation order
+1. Add fields to SurrealDB schema with `Unconfirmed` default (non-breaking)
+2. Build confirmation pass: match edge object nodes against supplementology evidence_claims
+   (direct Postgres query initially, `/v1/graph-feed` API after Phase 4)
+3. Update query engine confidence scoring
+4. Run confirmation pass for all 19 current ingredients
+5. Extend to 100 ingredients once supplementology Phase 5b complete
+
 ## Ingredient-to-Ingredient Edges (Synergy/Stacks)
 
 Real-world formulations (e.g., Bluebonnet Super Quercetin) contain ingredients that interact with *each other*, not just with body systems:
