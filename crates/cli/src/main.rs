@@ -1274,11 +1274,47 @@ async fn main() {
         }
     }
 
+    let supplementology_url = std::env::var("SUPPLEMENTOLOGY_URL")
+        .unwrap_or_else(|_| "http://localhost:3001".to_string());
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default();
+
     for nutra in &nutraceuticals {
         let correlation_id = Uuid::new_v4();
         println!("─── {} ─────────────────────────────────────────────", nutra);
         println!("  Correlation ID: {}", correlation_id);
+
+        // Fetch scientific synonyms from supplementology to enrich prompts.
+        // Silently skips if API unavailable — doesn't block ingestion.
+        let slug = nutra.to_lowercase().replace(' ', "_").replace('-', "_");
+        let synonyms: Vec<String> = async {
+            let resp = http_client
+                .get(format!("{}/v1/ingredients/{}/query-terms", supplementology_url, slug))
+                .send()
+                .await
+                .ok()?;
+            if !resp.status().is_success() { return None; }
+            let body: serde_json::Value = resp.json().await.ok()?;
+            Some(
+                body["query_terms"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|t| t["term"].as_str().map(|s| s.to_string()))
+                    .filter(|t| t.to_lowercase() != nutra.to_lowercase())
+                    .take(3)
+                    .collect()
+            )
+        }.await.unwrap_or_default();
+
+        if !synonyms.is_empty() {
+            println!("  Also known as:  {}", synonyms.join(", "));
+        }
         println!();
+
+        // Apply per-ingredient synonyms for this run
+        nsai.set_also_known_as(synonyms);
 
         let result = nsai.run(nutra, &graph, correlation_id).await;
 

@@ -85,6 +85,10 @@ pub struct NsaiLoop<'a> {
     merge_store: Option<&'a MergeStore>,
     umls_api_key: Option<String>,
     cui_cache_path: Option<std::path::PathBuf>,
+    /// Scientific synonyms/aliases for the ingredient, injected into prompts.
+    /// Helps the LLM use correct scientific terminology at higher lens levels
+    /// (e.g. "CoQ10" → also known as "Ubiquinone", "Coenzyme Q10").
+    also_known_as: Vec<String>,
 }
 
 impl<'a> NsaiLoop<'a> {
@@ -99,7 +103,19 @@ impl<'a> NsaiLoop<'a> {
             merge_store: None,
             umls_api_key: None,
             cui_cache_path: None,
+            also_known_as: Vec::new(),
         }
+    }
+
+    /// Provide scientific synonyms/aliases to inject into prompts (builder pattern).
+    pub fn with_also_known_as(mut self, synonyms: Vec<String>) -> Self {
+        self.also_known_as = synonyms;
+        self
+    }
+
+    /// Update synonyms in place for the current ingredient (used in multi-ingredient loops).
+    pub fn set_also_known_as(&mut self, synonyms: Vec<String>) {
+        self.also_known_as = synonyms;
     }
 
     pub fn with_umls(mut self, api_key: String, cache_path: std::path::PathBuf) -> Self {
@@ -230,7 +246,7 @@ impl<'a> NsaiLoop<'a> {
             for gap in gaps.iter().take(self.config.max_gaps_per_iteration) {
                 let edges_before_gap = graph.edge_count().await;
 
-                let question = prompts::gap_question(nutraceutical, gap);
+                let question = prompts::gap_question(&self.ingredient_with_aka(nutraceutical), gap);
 
                 let request = CompletionRequest::new(&question)
                     .with_system(prompts::gap_system_prompt().to_string());
@@ -436,11 +452,22 @@ impl<'a> NsaiLoop<'a> {
     }
 
     /// Ask the seed question: "What does X do as a supplement?" at 5th grade level.
+    /// Build the full ingredient name with scientific synonyms appended when available.
+    /// Used in prompts to help LLMs use correct terminology at higher lens levels.
+    fn ingredient_with_aka(&self, nutraceutical: &str) -> String {
+        if self.also_known_as.is_empty() {
+            nutraceutical.to_string()
+        } else {
+            format!("{} (also known as {})", nutraceutical, self.also_known_as.join(", "))
+        }
+    }
+
     async fn ask_seed(&self, nutraceutical: &str, correlation_id: Uuid) -> Option<String> {
+        let named = self.ingredient_with_aka(nutraceutical);
         let prompt = format!(
             "Explain to a 5th grader (10 years old) what {} does as a supplement, \
              in one sentence. Use simple everyday words. No scientific terms.",
-            nutraceutical
+            named
         );
 
         self.sink.emit(
