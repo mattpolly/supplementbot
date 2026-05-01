@@ -112,6 +112,26 @@ enum Commands {
         #[arg(long)]
         from: String,
     },
+
+    /// Confirm graph edges against supplementology evidence claims.
+    ///
+    /// Queries the supplementology API for evidence claims per ingredient,
+    /// matches them against existing graph edges, and inserts CitationRecords
+    /// into edge_citation. This promotes matched edges to CitationBacked
+    /// quality (1.5x score multiplier) automatically.
+    ///
+    /// Run once after supplementology Phase 6 completes, then re-run whenever
+    /// new research is ingested into supplementology.
+    ConfirmEdges {
+        /// Only confirm edges for this ingredient (e.g. "magnesium").
+        /// Omit to run for all ingredients in the graph.
+        #[arg(long)]
+        ingredient: Option<String>,
+
+        /// Supplementology API base URL
+        #[arg(long, default_value = "http://localhost:3001")]
+        supplementology_url: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -395,6 +415,160 @@ async fn run_migrate(from: &str) {
     println!("  Verify with: supplementbot query list");
 }
 
+async fn run_confirm_edges(ingredient: Option<String>, supplementology_url: String) {
+    let (db_url, db_user, db_pass) = db_connection();
+
+    let graph = KnowledgeGraph::open(&db_url, &db_user, &db_pass).await
+        .expect("failed to connect to graph DB");
+    let source_store = SourceStore::new(graph.db());
+
+    // Get ingredient names to process
+    let all_ingredients = graph.known_ingredients().await;
+    let ingredients: Vec<String> = if let Some(ref name) = ingredient {
+        all_ingredients.into_iter()
+            .filter(|n| n.to_lowercase() == name.to_lowercase())
+            .collect()
+    } else {
+        all_ingredients
+    };
+
+    println!("─── Confirm Edges ──────────────────────────────────────");
+    println!("  Supplementology: {}", supplementology_url);
+    println!("  Ingredients:     {}", ingredients.len());
+    println!();
+
+    let client = reqwest::Client::new();
+    let mut total_matched = 0usize;
+    let mut total_new = 0usize;
+
+    for ingredient_name in &ingredients {
+        let slug = ingredient_name.to_lowercase().replace(' ', "_").replace('-', "_");
+
+        let url = format!("{}/v1/graph-feed/{}", supplementology_url, slug);
+        let resp = match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) if r.status() == 404 => continue, // no supplementology data yet
+            Ok(r) => { eprintln!("  {} → HTTP {}", ingredient_name, r.status()); continue; }
+            Err(e) => { eprintln!("  {} → {}", ingredient_name, e); continue; }
+        };
+
+        let feed: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => { eprintln!("  {} → parse error: {}", ingredient_name, e); continue; }
+        };
+
+        // Get all outgoing edges for this ingredient
+        let ingredient_idx = match graph.find_node(ingredient_name).await {
+            Some(idx) => idx,
+            None => continue,
+        };
+        let outgoing = graph.outgoing_edges(&ingredient_idx).await;
+        if outgoing.is_empty() { continue; }
+
+        // Resolve target names for all edges (one DB call each)
+        let mut edge_info: Vec<(String, String)> = Vec::new(); // (target_name_lower, edge_type)
+        for (tidx, edata) in &outgoing {
+            let tname = graph.node_data(tidx).await
+                .map(|d| d.name.to_lowercase())
+                .unwrap_or_default();
+            edge_info.push((tname, edata.edge_type.to_string()));
+        }
+
+        let mut ingredient_new = 0usize;
+
+        // Match evidence claims → graph edges
+        if let Some(claims) = feed["evidence_claims"].as_array() {
+            for claim in claims {
+                let pmid = match claim["citation"]["pmid"].as_str() {
+                    Some(p) if !p.is_empty() => p.to_string(),
+                    _ => continue,
+                };
+                let claim_text = claim["claim_text"].as_str().unwrap_or("").to_lowercase();
+                let outcome   = claim["outcome"].as_str().unwrap_or("").to_lowercase();
+                let mechanism = claim["mechanism"].as_str().unwrap_or("").to_lowercase();
+                let direction = claim["direction"].as_str().unwrap_or("neutral");
+                let confidence = claim["confidence"].as_f64().unwrap_or(0.7);
+
+                for (i, (target_lower, edge_type)) in edge_info.iter().enumerate() {
+                    if target_lower.is_empty() { continue; }
+                    // Skip direction mismatch
+                    if edge_type == "has_adverse_reaction" && direction == "positive" { continue; }
+
+                    let hit = outcome.contains(target_lower.as_str())
+                        || mechanism.contains(target_lower.as_str())
+                        || claim_text.contains(target_lower.as_str());
+
+                    if hit {
+                        let target_name = graph.node_data(&outgoing[i].0).await
+                            .map(|d| d.name)
+                            .unwrap_or_default();
+                        let record = graph_service::source::CitationRecord {
+                            source_node: ingredient_name.clone(),
+                            target_node: target_name,
+                            edge_type: edge_type.clone(),
+                            pmid: pmid.clone(),
+                            sentence: claim["claim_text"].as_str().unwrap_or("").to_string(),
+                            confidence,
+                            suppkg_predicate: "supplementology".to_string(),
+                            source_cui: String::new(),
+                            target_cui: String::new(),
+                        };
+                        total_matched += 1;
+                        if source_store.record_citation(&record).await {
+                            ingredient_new += 1;
+                        }
+                        break; // one citation per claim
+                    }
+                }
+            }
+        }
+
+        // Also handle effectiveness relationships from iDISK/CTD
+        if let Some(effectiveness) = feed["effectiveness"].as_array() {
+            for eff in effectiveness {
+                let cond_lower = eff["condition_name"].as_str().unwrap_or("").to_lowercase();
+                for (i, (target_lower, edge_type)) in edge_info.iter().enumerate() {
+                    if edge_type != "is_effective_for" { continue; }
+                    if target_lower.contains(&cond_lower) || cond_lower.contains(target_lower.as_str()) {
+                        let target_name = graph.node_data(&outgoing[i].0).await
+                            .map(|d| d.name)
+                            .unwrap_or_default();
+                        let record = graph_service::source::CitationRecord {
+                            source_node: ingredient_name.clone(),
+                            target_node: target_name,
+                            edge_type: edge_type.clone(),
+                            pmid: format!("suppl:{}/{}", slug, cond_lower.replace(' ', "_")),
+                            sentence: format!("{} is effective for {}",
+                                ingredient_name,
+                                eff["condition_name"].as_str().unwrap_or("")),
+                            confidence: eff["confidence"].as_f64().unwrap_or(0.8),
+                            suppkg_predicate: "supplementology_effectiveness".to_string(),
+                            source_cui: String::new(),
+                            target_cui: String::new(),
+                        };
+                        total_matched += 1;
+                        if source_store.record_citation(&record).await {
+                            ingredient_new += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if ingredient_new > 0 {
+            println!("  {:25} → {} new citations stored", ingredient_name, ingredient_new);
+        }
+        total_new += ingredient_new;
+    }
+
+    println!();
+    println!("  Edges matched       : {}", total_matched);
+    println!("  New citations stored: {}", total_new);
+    println!("  Edges with stored citations are now CitationBacked (1.5× score multiplier)");
+    println!("  Re-run after new supplementology imports to pick up fresh evidence.");
+}
+
 async fn run_query(
     query_type: QueryType,
     lens_str: String,
@@ -568,6 +742,10 @@ async fn main() {
         }
         Some(Commands::Migrate { from }) => {
             run_migrate(&from).await;
+            return;
+        }
+        Some(Commands::ConfirmEdges { ingredient, supplementology_url }) => {
+            run_confirm_edges(ingredient, supplementology_url).await;
             return;
         }
         None => {}
