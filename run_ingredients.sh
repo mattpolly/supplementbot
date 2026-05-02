@@ -6,9 +6,9 @@
 #   ./run_ingredients.sh --resume "Ingredient 1" "Ingredient 2" ...
 #   ./run_ingredients.sh --retry-skipped
 #
-# State files (in /tmp/nsai_state/):
-#   checkpoint.txt      — last fully completed ingredient
-#   skipped.jsonl       — timed-out runs (ingredient, lens, provider, timestamp)
+# State files (persistent, survive reboots):
+#   data/nsai_checkpoint.txt  — last fully completed ingredient
+#   data/nsai_skipped.jsonl   — timed-out/failed runs for retry
 #
 # Monitor progress: tail -f /tmp/nsai_batch.log
 
@@ -18,10 +18,11 @@ cd /srv/www/supplementbot
 LENSES=("5th" "10th" "college")
 PROVIDERS=("anthropic" "gemini" "grok")
 TIMEOUT=180       # seconds per provider run before killing
+SCRIPT_TIMEOUT=240  # watchdog: kill entire provider call if still running after this
 LOG=/tmp/nsai_batch.log
-STATE_DIR=/tmp/nsai_state
-CHECKPOINT=$STATE_DIR/checkpoint.txt
-SKIPPED=$STATE_DIR/skipped.jsonl
+STATE_DIR=/srv/www/supplementbot/data
+CHECKPOINT=$STATE_DIR/nsai_checkpoint.txt
+SKIPPED=$STATE_DIR/nsai_skipped.jsonl
 
 mkdir -p $STATE_DIR
 
@@ -145,17 +146,28 @@ for ingredient in "$@"; do
             echo "    → $provider..." | tee -a $LOG
 
             set +e
-            output=$(timeout $TIMEOUT cargo run --bin supplementbot -- \
-                -n "$ingredient" --lens "$lens" --provider "$provider" 2>&1 \
-                | grep -E "Also known|KnowledgeGraph \(|complete|Error" || true)
-            exit_code=$?
+            # Run with timeout. Also start a watchdog that force-kills the
+            # entire process group if timeout itself hangs (Gemini/Grok can
+            # leave the timeout command blocked on a stalled HTTP connection).
+            output=$(
+                timeout $TIMEOUT cargo run --bin supplementbot -- \
+                    -n "$ingredient" --lens "$lens" --provider "$provider" 2>&1 \
+                    | grep -E "Also known|KnowledgeGraph \(|complete|Error" &
+                CMD_PID=$!
+                # Watchdog: kill everything after SCRIPT_TIMEOUT seconds
+                ( sleep $SCRIPT_TIMEOUT && kill -9 $CMD_PID 2>/dev/null ) &
+                WATCHDOG_PID=$!
+                wait $CMD_PID 2>/dev/null
+                kill $WATCHDOG_PID 2>/dev/null
+                true
+            )
+            exit_code=${PIPESTATUS[0]:-0}
             set -e
 
-            if [ $exit_code -eq 124 ]; then
+            if [ $exit_code -eq 124 ] || [ $exit_code -eq 137 ]; then
                 msg="       ⚠ TIMED OUT after ${TIMEOUT}s — skipping $provider"
                 echo "$msg" | tee -a $LOG
-                # Record for later retry
-                echo "{\"ingredient\":\"$ingredient\",\"lens\":\"$lens\",\"provider\":\"$provider\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >> $SKIPPED
+                echo "{\"ingredient\":\"$ingredient\",\"lens\":\"$lens\",\"provider\":\"$provider\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"reason\":\"timeout\"}" >> $SKIPPED
             elif [ $exit_code -ne 0 ] && [ $exit_code -ne 1 ]; then
                 echo "       ✗ Error (exit $exit_code) — skipping $provider" | tee -a $LOG
                 echo "{\"ingredient\":\"$ingredient\",\"lens\":\"$lens\",\"provider\":\"$provider\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"reason\":\"exit_$exit_code\"}" >> $SKIPPED
