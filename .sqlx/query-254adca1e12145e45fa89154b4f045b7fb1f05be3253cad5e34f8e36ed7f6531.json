@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO node_observation (entity_id, provider, model, correlation_id, observed_at)\n                VALUES ($1, $2, $3, $4, $5)\n                ON CONFLICT DO NOTHING\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "254adca1e12145e45fa89154b4f045b7fb1f05be3253cad5e34f8e36ed7f6531"
+}

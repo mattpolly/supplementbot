@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH et AS (SELECT id FROM entity_type WHERE name = $1)\n            INSERT INTO entity (type_id, name, slug, source, attrs)\n            SELECT et.id, $2, $3, 'nsai_graph', '{}'\n            FROM et\n            ON CONFLICT (type_id, slug) DO NOTHING\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d627bf72bf4e9b6cacaff75cb81336a87f6cedb5b8c67a825f78cc260c90f7a2"
+}

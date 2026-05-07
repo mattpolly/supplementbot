@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT r.id FROM relationship r\n            JOIN rel_type rt ON rt.id = r.rel_type_id\n            JOIN entity e1 ON e1.id = r.from_entity\n            JOIN entity e2 ON e2.id = r.to_entity\n            WHERE LOWER(e1.name) = LOWER($1)\n              AND LOWER(e2.name) = LOWER($2)\n              AND rt.name = $3\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f3f439d725ffa78d2053419910da1a75bdf6b0afd0e4d4b2f9067c70086703d6"
+}

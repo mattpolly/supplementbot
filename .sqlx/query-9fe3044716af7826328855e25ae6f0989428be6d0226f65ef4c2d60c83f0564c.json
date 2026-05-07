@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(SELECT 1 FROM evidence_claim WHERE entity_id = $1 AND citation_id = $2 AND source = 'supplementbot_confirmed')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9fe3044716af7826328855e25ae6f0989428be6d0226f65ef4c2d60c83f0564c"
+}

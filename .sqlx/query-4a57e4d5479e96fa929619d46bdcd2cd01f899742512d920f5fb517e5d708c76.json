@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT r.id, r.from_entity, r.to_entity,\n                   rt.name AS rel_type_name,\n                   r.confidence, r.complexity, r.source, r.attrs\n            FROM relationship r\n            JOIN rel_type rt ON rt.id = r.rel_type_id\n            WHERE r.from_entity = $1 OR r.to_entity = $1\n            ORDER BY r.confidence DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "from_entity",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "to_entity",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "rel_type_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "confidence",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 5,
+        "name": "complexity",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 6,
+        "name": "source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "attrs",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4a57e4d5479e96fa929619d46bdcd2cd01f899742512d920f5fb517e5d708c76"
+}

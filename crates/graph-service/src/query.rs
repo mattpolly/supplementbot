@@ -1219,7 +1219,7 @@ mod tests {
     ///   Zinc (Ingredient) →[acts_on]→ Muscular System (System)
     async fn build_test_graph() -> (KnowledgeGraph, SourceStore, MergeStore) {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
-        let source = SourceStore::new(kg.db());
+        let source = SourceStore::new(kg.pool());
         let merge = MergeStore::new(kg.db());
 
         let cramps = kg

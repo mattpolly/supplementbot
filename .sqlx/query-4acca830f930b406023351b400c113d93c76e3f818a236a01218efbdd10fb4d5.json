@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE relationship SET\n                confidence = LEAST(1.0, confidence + $4)\n            WHERE from_entity = $1 AND to_entity = $2\n              AND rel_type_id = (SELECT id FROM rel_type WHERE name = $3)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Float4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4acca830f930b406023351b400c113d93c76e3f818a236a01218efbdd10fb4d5"
+}

@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                e1.name AS source_node,\n                e2.name AS target_node,\n                rt.name AS edge_type,\n                COUNT(DISTINCT eo.provider) AS provider_count,\n                COUNT(eo.id) AS total_obs,\n                BOOL_OR(ec.id IS NOT NULL) AS has_citation\n            FROM relationship r\n            JOIN rel_type rt ON rt.id = r.rel_type_id\n            JOIN entity e1 ON e1.id = r.from_entity\n            JOIN entity e2 ON e2.id = r.to_entity\n            LEFT JOIN edge_observation eo ON eo.relationship_id = r.id\n            LEFT JOIN evidence_claim ec ON ec.entity_id = r.from_entity\n                AND ec.source = 'supplementbot_confirmed'\n                AND ec.attrs->>'target_node' = LOWER(e2.name)\n            WHERE r.source LIKE 'nsai%'\n            GROUP BY r.id, e1.name, e2.name, rt.name\n            ORDER BY provider_count DESC, total_obs DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_node",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "target_node",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "edge_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "provider_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "total_obs",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "has_citation",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "47e3e9e07b6eb3429078a69de654a9c7120cb77bfa2d82fa15267dc02728dd38"
+}

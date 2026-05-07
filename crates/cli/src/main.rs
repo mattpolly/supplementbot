@@ -158,11 +158,14 @@ enum QueryType {
 fn db_connection() -> (String, String, String) {
     let url = std::env::var("DB_URL").unwrap_or_else(|_| "ws://localhost:8000".to_string());
     let user = std::env::var("DB_USER").unwrap_or_else(|_| "root".to_string());
-    let pass = std::env::var("DB_PASS").unwrap_or_else(|_| {
-        eprintln!("Warning: DB_PASS not set, using empty password");
-        String::new()
-    });
+    let pass = std::env::var("DB_PASS").unwrap_or_else(|_| "root".to_string());
     (url, user, pass)
+}
+
+fn pg_url() -> String {
+    std::env::var("SUPPLEMENTOLOGY_DATABASE_URL").unwrap_or_else(|_| {
+        "postgresql://supplementology:supplementology@localhost:5433/supplementology".to_string()
+    })
 }
 
 fn build_provider(cli: &Cli) -> Result<Box<dyn LlmProvider>, String> {
@@ -305,122 +308,19 @@ fn parse_quality(s: &str) -> Option<EdgeQuality> {
     }
 }
 
-async fn run_migrate(from: &str) {
-    println!("─── Migrate ────────────────────────────────────────────");
-    println!("  Source (embedded): {}", from);
-
-    let src = match KnowledgeGraph::open_embedded(from).await {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("Error opening embedded graph: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let src_nodes = src.node_count().await;
-    let src_edges = src.edge_count().await;
-    println!("  Found: {} nodes, {} edges", src_nodes, src_edges);
-
-    if src_nodes == 0 {
-        eprintln!("Source graph is empty — nothing to migrate.");
-        std::process::exit(1);
-    }
-
-    let (db_url, db_user, db_pass) = db_connection();
-    println!("  Destination (server): {}", db_url);
-
-    let dst = match KnowledgeGraph::open(&db_url, &db_user, &db_pass).await {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("Error connecting to destination server: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let dst_nodes_before = dst.node_count().await;
-    if dst_nodes_before > 0 {
-        eprintln!(
-            "Warning: destination already has {} nodes. Proceeding will add to existing data.",
-            dst_nodes_before
-        );
-    }
-
-    // --- Nodes ---
-    let src_node_list = src.all_nodes().await;
-    let mut nodes_inserted = 0usize;
-    for idx in &src_node_list {
-        if let Some(data) = src.node_data(idx).await {
-            dst.add_node(data).await;
-            nodes_inserted += 1;
-        }
-    }
-    println!("  node: {} / {} inserted", nodes_inserted, src_node_list.len());
-
-    // --- Edges (use typed API to avoid RecordId serialization issues) ---
-    let src_edges_list = src.all_edges().await;
-    let edge_count = src_edges_list.len();
-    let mut edges_inserted = 0usize;
-    for (src_idx, tgt_idx, edge_data) in src_edges_list {
-        // Resolve node names from source, find them in destination
-        if let (Some(src_data), Some(tgt_data)) = (
-            src.node_data(&src_idx).await,
-            src.node_data(&tgt_idx).await,
-        ) {
-            if let (Some(dst_src), Some(dst_tgt)) = (
-                dst.find_node(&src_data.name).await,
-                dst.find_node(&tgt_data.name).await,
-            ) {
-                dst.add_edge(&dst_src, &dst_tgt, edge_data).await;
-                edges_inserted += 1;
-            }
-        }
-    }
-    println!("  edge: {} / {} inserted", edges_inserted, edge_count);
-
-    // --- Flat tables (source/merge) via raw JSON ---
-    let flat_tables = ["node_source", "edge_source", "node_alias", "node_cui"];
-    for table in &flat_tables {
-        let records: Vec<serde_json::Value> = src
-            .db()
-            .query(format!("SELECT * FROM {table}"))
-            .await
-            .and_then(|mut r| r.take(0))
-            .unwrap_or_default();
-
-        let count = records.len();
-        if count == 0 {
-            println!("  {}: empty, skipping", table);
-            continue;
-        }
-
-        let mut inserted = 0usize;
-        for record in &records {
-            let ok = dst
-                .db()
-                .create::<Option<serde_json::Value>>(*table)
-                .content(record.clone())
-                .await
-                .is_ok();
-            if ok {
-                inserted += 1;
-            }
-        }
-        println!("  {}: {} / {} inserted", table, inserted, count);
-    }
-
-    let dst_nodes = dst.node_count().await;
-    let dst_edges = dst.edge_count().await;
-    println!();
-    println!("  Done: {} nodes, {} edges in destination", dst_nodes, dst_edges);
-    println!("  Verify with: supplementbot query list");
+async fn run_migrate(_from: &str) {
+    eprintln!("The 'migrate' command is no longer supported.");
+    eprintln!("The supplement knowledge base now lives in Postgres (supplementology).");
+    eprintln!("Use the ETL scripts in supplementology/etl/scripts/ to load data.");
+    std::process::exit(1);
 }
 
 async fn run_confirm_edges(ingredient: Option<String>, supplementology_url: String) {
     let (db_url, db_user, db_pass) = db_connection();
 
-    let graph = KnowledgeGraph::open(&db_url, &db_user, &db_pass).await
+    let graph = KnowledgeGraph::open(&pg_url(), &db_url, &db_user, &db_pass).await
         .expect("failed to connect to graph DB");
-    let source_store = SourceStore::new(graph.db());
+    let source_store = SourceStore::new(graph.pool());
 
     // Get ingredient names to process
     let all_ingredients = graph.known_ingredients().await;
@@ -576,7 +476,7 @@ async fn run_query(
     min_confidence: Option<f64>,
 ) {
     let (db_url, db_user, db_pass) = db_connection();
-    let graph = match KnowledgeGraph::open(&db_url, &db_user, &db_pass).await {
+    let graph = match KnowledgeGraph::open(&pg_url(), &db_url, &db_user, &db_pass).await {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error opening graph database: {}", e);
@@ -590,7 +490,7 @@ async fn run_query(
         std::process::exit(1);
     }
 
-    let source = SourceStore::new(graph.db());
+    let source = SourceStore::new(graph.pool());
     let merge = MergeStore::new(graph.db());
     let engine = QueryEngine::new(&graph, &source, &merge).await;
 
@@ -789,8 +689,8 @@ async fn main() {
         }
     };
 
-    // Connect to SurrealDB server
-    let graph = match KnowledgeGraph::open(&db_path, &db_user, &db_pass).await {
+    // Connect to supplementology Postgres + SurrealDB (intake graph)
+    let graph = match KnowledgeGraph::open(&pg_url(), &db_path, &db_user, &db_pass).await {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error opening graph database: {}", e);
@@ -833,10 +733,8 @@ async fn main() {
         return;
     }
 
-    // Create source store for provenance tracking (shares DB with graph)
-    let source_store = SourceStore::new(graph.db());
-
-    // Create merge store for synonym resolution (shares DB with graph)
+    // Create source store (Postgres) and merge store (SurrealDB)
+    let source_store = SourceStore::new(graph.pool());
     let merge_store = MergeStore::new(graph.db());
 
     // --resolve-cuis: populate merge store CUIs from SuppKG and exit (no LLM)

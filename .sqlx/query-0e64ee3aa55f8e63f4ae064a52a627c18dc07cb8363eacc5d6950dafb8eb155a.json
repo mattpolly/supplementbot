@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT c.pmid, ec.claim_text AS sentence, ec.confidence,\n                   ec.attrs->>'edge_type' AS edge_type,\n                   ec.attrs->>'suppkg_predicate' AS suppkg_predicate,\n                   ec.attrs->>'target_node' AS target_node_attr,\n                   ec.attrs->>'target_cui' AS target_cui,\n                   ec.attrs->>'source_cui' AS source_cui\n            FROM evidence_claim ec\n            JOIN citation c ON c.id = ec.citation_id\n            JOIN entity e ON e.id = ec.entity_id\n            WHERE LOWER(e.name) = LOWER($1)\n              AND LOWER(ec.attrs->>'target_node') = LOWER($2)\n              AND ec.source = 'supplementbot_confirmed'\n            ORDER BY ec.confidence DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pmid",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "sentence",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "confidence",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 3,
+        "name": "edge_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "suppkg_predicate",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "target_node_attr",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "target_cui",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "source_cui",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "0e64ee3aa55f8e63f4ae064a52a627c18dc07cb8363eacc5d6950dafb8eb155a"
+}

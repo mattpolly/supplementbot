@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT r.from_entity, r.to_entity, rt.name AS rel_type_name,\n                   r.confidence, r.source, r.attrs\n            FROM relationship r JOIN rel_type rt ON rt.id = r.rel_type_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "from_entity",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "to_entity",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "rel_type_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "confidence",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 4,
+        "name": "source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "attrs",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d13c264a3ffa41900ad988b2ee6a11ff68363b0284ff00487a7f7850fd892dcf"
+}

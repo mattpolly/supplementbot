@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO relationship (rel_type_id, from_entity, to_entity, confidence, complexity, source, attrs)\n            SELECT rt.id, $2, $3, $4, $5, $6, $7\n            FROM rel_type rt WHERE rt.name = $1\n            ON CONFLICT DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Float4",
+        "Float4",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d20564d5e00544dfba46047a38c8dd8214b185addeaccc8de398a6a6c2ea1348"
+}

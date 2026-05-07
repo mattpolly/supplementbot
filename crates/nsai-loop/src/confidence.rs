@@ -175,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn test_boost_multi_provider_edges() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let store = SourceStore::new(graph.db());
+        let store = SourceStore::new(graph.pool());
         let now = Utc::now();
 
         // Create graph structure
@@ -240,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn test_no_boost_single_provider() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let store = SourceStore::new(graph.db());
+        let store = SourceStore::new(graph.pool());
         let now = Utc::now();
 
         let mag = graph
@@ -285,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn test_boost_caps_at_one() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let store = SourceStore::new(graph.db());
+        let store = SourceStore::new(graph.pool());
         let now = Utc::now();
 
         let mag = graph
@@ -331,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn test_decay_speculative_edge() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let store = SourceStore::new(graph.db());
+        let store = SourceStore::new(graph.pool());
 
         let mag = graph
             .add_node(NodeData::new("magnesium", NodeType::Ingredient))
@@ -368,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn test_decay_skips_extracted_edges() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let store = SourceStore::new(graph.db());
+        let store = SourceStore::new(graph.pool());
 
         let mag = graph
             .add_node(NodeData::new("magnesium", NodeType::Ingredient))
@@ -400,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn test_decay_respects_floor() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let store = SourceStore::new(graph.db());
+        let store = SourceStore::new(graph.pool());
 
         let mag = graph
             .add_node(NodeData::new("magnesium", NodeType::Ingredient))
@@ -432,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn test_decay_exempts_multi_provider() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let store = SourceStore::new(graph.db());
+        let store = SourceStore::new(graph.pool());
         let now = Utc::now();
 
         let mag = graph

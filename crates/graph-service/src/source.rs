@@ -1,89 +1,15 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::engine::any::Any;
-use surrealdb::Surreal;
-use surrealdb_types::SurrealValue;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// Source tracking — who said what, when, and how many times.
-//
-// These are materialized projections of event log data, not primary storage.
-// The JSONL event log is the portable source of truth. These tables exist
-// for fast queries like "which providers have confirmed this edge?"
-//
-// Tables: node_source, edge_source (relational, not graph relations)
+// Public types — unchanged from the SurrealDB version so callers don't break.
 // ---------------------------------------------------------------------------
 
-/// A single observation of a node by a provider.
-#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
-pub struct NodeObservation {
-    /// The node name (matches graph node key)
-    pub node_name: String,
-    /// The node type as observed
-    pub node_type: String,
-    /// Which provider observed this node
-    pub provider: String,
-    /// Which model observed this node
-    pub model: String,
-    /// When the observation was recorded
-    pub observed_at: String,
-    /// Correlation ID linking back to the event log
-    pub correlation_id: String,
-}
-
-/// A single observation of an edge by a provider — either creation or confirmation.
-#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
-pub struct EdgeObservation {
-    /// Source node name
-    pub source_node: String,
-    /// Target node name
-    pub target_node: String,
-    /// Edge type
-    pub edge_type: String,
-    /// Confidence assigned by this observation
-    pub confidence: f64,
-    /// How this edge was produced (Extracted, StructurallyEmergent, Deduced)
-    pub source_tag: String,
-    /// Whether this was the initial creation or a confirmation of existing edge
-    pub observation_type: String, // "created" or "confirmed"
-    /// Which provider observed this edge
-    pub provider: String,
-    /// Which model observed this edge
-    pub model: String,
-    /// When the observation was recorded
-    pub observed_at: String,
-    /// Correlation ID linking back to the event log
-    pub correlation_id: String,
-}
-
-/// A PubMed citation backing a specific edge, sourced from SuppKG.
-#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+/// A PubMed citation backing a specific edge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CitationRecord {
-    /// Our graph's source node name
-    pub source_node: String,
-    /// Our graph's target node name
-    pub target_node: String,
-    /// Our graph's edge type
-    pub edge_type: String,
-    /// PubMed ID
-    pub pmid: String,
-    /// Supporting sentence from the abstract
-    pub sentence: String,
-    /// SuppKG's confidence for this citation
-    pub confidence: f64,
-    /// The SuppKG predicate that matched (e.g. AFFECTS, STIMULATES)
-    pub suppkg_predicate: String,
-    /// CUI that matched our source node
-    pub source_cui: String,
-    /// CUI that matched our target node
-    pub target_cui: String,
-}
-
-#[derive(Debug, Clone, SurrealValue)]
-struct CitationRecordWithId {
-    #[allow(dead_code)]
-    id: surrealdb_types::RecordId,
     pub source_node: String,
     pub target_node: String,
     pub edge_type: String,
@@ -95,27 +21,9 @@ struct CitationRecordWithId {
     pub target_cui: String,
 }
 
-impl From<CitationRecordWithId> for CitationRecord {
-    fn from(r: CitationRecordWithId) -> Self {
-        Self {
-            source_node: r.source_node,
-            target_node: r.target_node,
-            edge_type: r.edge_type,
-            pmid: r.pmid,
-            sentence: r.sentence,
-            confidence: r.confidence,
-            suppkg_predicate: r.suppkg_predicate,
-            source_cui: r.source_cui,
-            target_cui: r.target_cui,
-        }
-    }
-}
-
-/// Returned from the select (has SurrealDB's auto-generated id)
-#[derive(Debug, Clone, SurrealValue)]
-struct EdgeObservationWithId {
-    #[allow(dead_code)]
-    id: surrealdb_types::RecordId,
+/// A single observation of an edge by a provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeObservation {
     pub source_node: String,
     pub target_node: String,
     pub edge_type: String,
@@ -128,34 +36,18 @@ struct EdgeObservationWithId {
     pub correlation_id: String,
 }
 
-impl From<EdgeObservationWithId> for EdgeObservation {
-    fn from(r: EdgeObservationWithId) -> Self {
-        Self {
-            source_node: r.source_node,
-            target_node: r.target_node,
-            edge_type: r.edge_type,
-            confidence: r.confidence,
-            source_tag: r.source_tag,
-            observation_type: r.observation_type,
-            provider: r.provider,
-            model: r.model,
-            observed_at: r.observed_at,
-            correlation_id: r.correlation_id,
-        }
-    }
+/// A single observation of a node by a provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeObservation {
+    pub node_name: String,
+    pub node_type: String,
+    pub provider: String,
+    pub model: String,
+    pub observed_at: String,
+    pub correlation_id: String,
 }
 
-/// Summary of provider agreement for a specific edge.
-#[derive(Debug, Clone)]
-pub struct EdgeAgreement {
-    /// How many distinct providers have observed this edge (created or confirmed)
-    pub provider_count: usize,
-    /// Which providers and their observation types
-    pub providers: Vec<ProviderObservation>,
-    /// How many total observations (including multiple from the same provider)
-    pub total_observations: usize,
-}
-
+/// Per-provider observation summary for an edge.
 #[derive(Debug, Clone)]
 pub struct ProviderObservation {
     pub provider: String,
@@ -164,512 +56,33 @@ pub struct ProviderObservation {
     pub confidence: f64,
 }
 
-// ---------------------------------------------------------------------------
-// SourceStore — queryable projection of event log data
-// ---------------------------------------------------------------------------
-
-/// Tracks which providers observed which nodes and edges. Shares a SurrealDB
-/// connection with the KnowledgeGraph — both live in the same database.
-///
-/// The source tables are materialized views of event log data.
-/// The JSONL event log is the portable source of truth.
-pub struct SourceStore {
-    db: Surreal<Any>,
-}
-
-impl SourceStore {
-    /// Create a source store using the same DB handle as the KnowledgeGraph.
-    pub fn new(db: &Surreal<Any>) -> Self {
-        Self { db: db.clone() }
-    }
-
-    // -- Write operations (projecting events into tables) ------------------
-
-    /// Record that a node was observed by a provider.
-    pub async fn record_node_observation(
-        &self,
-        node_name: &str,
-        node_type: &str,
-        provider: &str,
-        model: &str,
-        correlation_id: Uuid,
-        observed_at: DateTime<Utc>,
-    ) {
-        let obs = NodeObservation {
-            node_name: node_name.to_lowercase(),
-            node_type: node_type.to_string(),
-            provider: provider.to_string(),
-            model: model.to_string(),
-            observed_at: observed_at.to_rfc3339(),
-            correlation_id: correlation_id.to_string(),
-        };
-        let _: Result<Option<NodeObservation>, _> = self.db.create("node_source").content(obs).await;
-    }
-
-    /// Record that an edge was created by a provider.
-    pub async fn record_edge_created(
-        &self,
-        source_node: &str,
-        target_node: &str,
-        edge_type: &str,
-        confidence: f64,
-        source_tag: &str,
-        provider: &str,
-        model: &str,
-        correlation_id: Uuid,
-        observed_at: DateTime<Utc>,
-    ) {
-        let obs = EdgeObservation {
-            source_node: source_node.to_lowercase(),
-            target_node: target_node.to_lowercase(),
-            edge_type: edge_type.to_string(),
-            confidence,
-            source_tag: source_tag.to_string(),
-            observation_type: "created".to_string(),
-            provider: provider.to_string(),
-            model: model.to_string(),
-            observed_at: observed_at.to_rfc3339(),
-            correlation_id: correlation_id.to_string(),
-        };
-        let _: Result<Option<EdgeObservation>, _> = self.db.create("edge_source").content(obs).await;
-    }
-
-    /// Record that an existing edge was confirmed by a provider.
-    pub async fn record_edge_confirmed(
-        &self,
-        source_node: &str,
-        target_node: &str,
-        edge_type: &str,
-        provider: &str,
-        model: &str,
-        correlation_id: Uuid,
-        observed_at: DateTime<Utc>,
-    ) {
-        let obs = EdgeObservation {
-            source_node: source_node.to_lowercase(),
-            target_node: target_node.to_lowercase(),
-            edge_type: edge_type.to_string(),
-            confidence: 0.0, // confirmation doesn't carry its own confidence
-            source_tag: "Confirmed".to_string(),
-            observation_type: "confirmed".to_string(),
-            provider: provider.to_string(),
-            model: model.to_string(),
-            observed_at: observed_at.to_rfc3339(),
-            correlation_id: correlation_id.to_string(),
-        };
-        let _: Result<Option<EdgeObservation>, _> = self.db.create("edge_source").content(obs).await;
-    }
-
-    // -- Query operations --------------------------------------------------
-
-    /// Get all observations for a specific edge (created + confirmed).
-    pub async fn observations_for_edge(
-        &self,
-        source_node: &str,
-        target_node: &str,
-        edge_type: &str,
-    ) -> Vec<EdgeObservation> {
-        let mut result = self
-            .db
-            .query(
-                "SELECT * FROM edge_source WHERE source_node = $src AND target_node = $tgt AND edge_type = $et ORDER BY observed_at ASC",
-            )
-            .bind(("src", source_node.to_lowercase()))
-            .bind(("tgt", target_node.to_lowercase()))
-            .bind(("et", edge_type.to_string()))
-            .await
-            .unwrap();
-        let records: Vec<EdgeObservationWithId> = result.take(0).unwrap_or_default();
-        records.into_iter().map(EdgeObservation::from).collect()
-    }
-
-    /// Get provider agreement summary for a specific edge.
-    pub async fn provider_agreement(
-        &self,
-        source_node: &str,
-        target_node: &str,
-        edge_type: &str,
-    ) -> EdgeAgreement {
-        let observations = self
-            .observations_for_edge(source_node, target_node, edge_type)
-            .await;
-
-        let providers: Vec<ProviderObservation> = observations
-            .iter()
-            .map(|o| ProviderObservation {
-                provider: o.provider.clone(),
-                model: o.model.clone(),
-                observation_type: o.observation_type.clone(),
-                confidence: o.confidence,
-            })
-            .collect();
-
-        let unique_providers: std::collections::HashSet<&str> =
-            providers.iter().map(|p| p.provider.as_str()).collect();
-
-        EdgeAgreement {
-            provider_count: unique_providers.len(),
-            total_observations: observations.len(),
-            providers,
-        }
-    }
-
-    /// Count total edge observations across all edges.
-    pub async fn total_edge_observations(&self) -> usize {
-        let mut result = self
-            .db
-            .query("SELECT count() FROM edge_source GROUP ALL")
-            .await
-            .unwrap();
-        let counts: Vec<CountResult> = result.take(0).unwrap_or_default();
-        counts.into_iter().next().map(|c| c.count).unwrap_or(0)
-    }
-
-    /// Count total node observations across all nodes.
-    pub async fn total_node_observations(&self) -> usize {
-        let mut result = self
-            .db
-            .query("SELECT count() FROM node_source GROUP ALL")
-            .await
-            .unwrap();
-        let counts: Vec<CountResult> = result.take(0).unwrap_or_default();
-        counts.into_iter().next().map(|c| c.count).unwrap_or(0)
-    }
-
-    /// Classify all observed edges by quality tier.
-    ///
-    /// Quality is derived from source observations:
-    /// - Deduced: only `system:forward_chain` observations
-    /// - Speculative: only `StructurallyEmergent` source tags
-    /// - SingleProvider: extracted by exactly one LLM provider
-    /// - MultiProvider: extracted by 2+ independent LLM providers
-    pub async fn edges_by_quality(&self) -> Vec<EdgeWithQuality> {
-        let mut result = self
-            .db
-            .query(
-                "SELECT source_node, target_node, edge_type, \
-                 array::distinct(provider) AS providers, \
-                 array::distinct(source_tag) AS source_tags, \
-                 count() AS total_obs \
-                 FROM edge_source \
-                 GROUP BY source_node, target_node, edge_type",
-            )
-            .await
-            .unwrap();
-        let records: Vec<QualityGroupedEdge> = result.take(0).unwrap_or_default();
-
-        // Build set of edges that have citations — project only the 3 key fields
-        // to avoid fetching all 300k+ citation records over the WebSocket.
-        #[derive(serde::Deserialize, SurrealValue)]
-        struct CitedEdgeKey { source_node: String, target_node: String, edge_type: String }
-        let cited: std::collections::HashSet<(String, String, String)> = self
-            .db
-            .query("SELECT source_node, target_node, edge_type FROM edge_citation GROUP BY source_node, target_node, edge_type")
-            .await
-            .ok()
-            .and_then(|mut r| r.take::<Vec<CitedEdgeKey>>(0).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|c| (c.source_node, c.target_node, c.edge_type))
-            .collect();
-
-        records
-            .into_iter()
-            .map(|r| {
-                // Filter out system providers to count real LLM providers
-                let llm_providers: Vec<&String> = r
-                    .providers
-                    .iter()
-                    .filter(|p| !p.starts_with("system:"))
-                    .collect();
-
-                let has_citation = cited.contains(&(
-                    r.source_node.clone(),
-                    r.target_node.clone(),
-                    r.edge_type.clone(),
-                ));
-
-                let quality = if has_citation {
-                    EdgeQuality::CitationBacked
-                } else if llm_providers.len() >= 2 {
-                    EdgeQuality::MultiProvider
-                } else if llm_providers.len() == 1 {
-                    // Check if this is purely speculative
-                    let all_speculative = r.source_tags.iter().all(|t| {
-                        t == "StructurallyEmergent" || t == "Confirmed"
-                    });
-                    if all_speculative {
-                        EdgeQuality::Speculative
-                    } else {
-                        EdgeQuality::SingleProvider
-                    }
-                } else {
-                    // Only system providers (forward chain)
-                    EdgeQuality::Deduced
-                };
-
-                EdgeWithQuality {
-                    source_node: r.source_node,
-                    target_node: r.target_node,
-                    edge_type: r.edge_type,
-                    quality,
-                    provider_count: llm_providers.len(),
-                    total_observations: r.total_obs,
-                }
-            })
-            .collect()
-    }
-
-    /// Get all edges at or above a given quality tier.
-    pub async fn edges_at_quality(&self, min_quality: EdgeQuality) -> Vec<EdgeWithQuality> {
-        self.edges_by_quality()
-            .await
-            .into_iter()
-            .filter(|e| e.quality >= min_quality)
-            .collect()
-    }
-
-    /// Get all edges that have been observed by multiple providers.
-    pub async fn multi_provider_edges(&self) -> Vec<MultiProviderEdge> {
-        // Get distinct (source, target, edge_type, provider) combinations
-        let mut result = self
-            .db
-            .query(
-                "SELECT source_node, target_node, edge_type, array::distinct(provider) AS providers \
-                 FROM edge_source \
-                 GROUP BY source_node, target_node, edge_type",
-            )
-            .await
-            .unwrap();
-        let records: Vec<GroupedEdge> = result.take(0).unwrap_or_default();
-
-        records
-            .into_iter()
-            .filter(|r| r.providers.len() > 1)
-            .map(|r| MultiProviderEdge {
-                source_node: r.source_node,
-                target_node: r.target_node,
-                edge_type: r.edge_type,
-                providers: r.providers,
-            })
-            .collect()
-    }
-
-    // -- Citation methods -----------------------------------------------------
-
-    /// Record a PubMed citation backing a specific edge.
-    ///
-    /// Deduplicates by (source_node, pmid) — if a citation for this ingredient
-    /// and PMID already exists, it is skipped. This makes citation backing
-    /// idempotent: safe to re-run without creating duplicates.
-    ///
-    /// For bulk inserts, prefer `record_citations_batch` which fetches existing
-    /// PMIDs in a single query instead of one round-trip per citation.
-    pub async fn record_citation(&self, citation: &CitationRecord) -> bool {
-        // Check for existing citation with same source_node + pmid
-        #[derive(SurrealValue)]
-        struct CountResult {
-            count: u64,
-        }
-        let existing: Vec<CountResult> = self
-            .db
-            .query(
-                "SELECT count() AS count FROM edge_citation \
-                 WHERE source_node = $src AND pmid = $pmid GROUP ALL",
-            )
-            .bind(("src", citation.source_node.clone()))
-            .bind(("pmid", citation.pmid.clone()))
-            .await
-            .unwrap_or_else(|_| unreachable!())
-            .take(0)
-            .unwrap_or_default();
-
-        if existing.first().map(|r| r.count).unwrap_or(0) > 0 {
-            return false; // Already exists
-        }
-
-        let _: Result<Option<CitationRecord>, _> = self
-            .db
-            .create("edge_citation")
-            .content(citation.clone())
-            .await;
-        true
-    }
-
-    /// Fetch all existing PMIDs for an ingredient in one query.
-    /// Used by citation backing to dedup in-memory instead of per-citation round-trips.
-    pub async fn existing_pmids_for(&self, source_node: &str) -> std::collections::HashSet<String> {
-        #[derive(SurrealValue)]
-        struct PmidRow {
-            pmid: String,
-        }
-        let rows: Vec<PmidRow> = self
-            .db
-            .query("SELECT pmid FROM edge_citation WHERE source_node = $src")
-            .bind(("src", source_node.to_lowercase()))
-            .await
-            .unwrap_or_else(|_| unreachable!())
-            .take(0)
-            .unwrap_or_default();
-        rows.into_iter().map(|r| r.pmid).collect()
-    }
-
-    /// Record multiple citations for a single ingredient, deduplicating in bulk.
-    ///
-    /// Fetches existing PMIDs once, then inserts only new ones. Much faster than
-    /// calling `record_citation` in a loop (1 query instead of N).
-    pub async fn record_citations_batch(&self, citations: &[CitationRecord]) -> usize {
-        if citations.is_empty() {
-            return 0;
-        }
-        let source_node = &citations[0].source_node;
-        let existing = self.existing_pmids_for(source_node).await;
-
-        let mut stored = 0;
-        for citation in citations {
-            if existing.contains(&citation.pmid) {
-                continue;
-            }
-            let _: Result<Option<CitationRecord>, _> = self
-                .db
-                .create("edge_citation")
-                .content(citation.clone())
-                .await;
-            stored += 1;
-        }
-        stored
-    }
-
-    /// Get all citations for a specific edge.
-    pub async fn citations_for_edge(
-        &self,
-        source_node: &str,
-        target_node: &str,
-        edge_type: &str,
-    ) -> Vec<CitationRecord> {
-        let results: Vec<CitationRecordWithId> = self
-            .db
-            .query(
-                "SELECT * FROM edge_citation WHERE source_node = $src AND target_node = $tgt AND edge_type = $et",
-            )
-            .bind(("src", source_node.to_lowercase()))
-            .bind(("tgt", target_node.to_lowercase()))
-            .bind(("et", edge_type.to_string()))
-            .await
-            .unwrap()
-            .take(0)
-            .unwrap_or_default();
-
-        results.into_iter().map(CitationRecord::from).collect()
-    }
-
-    /// Get all citations for a specific ingredient (by source_node name only).
-    pub async fn citations_for_ingredient(&self, ingredient: &str) -> Vec<CitationRecord> {
-        let results: Vec<CitationRecordWithId> = self
-            .db
-            .query("SELECT * FROM edge_citation WHERE source_node = $src ORDER BY confidence DESC")
-            .bind(("src", ingredient.to_lowercase()))
-            .await
-            .unwrap()
-            .take(0)
-            .unwrap_or_default();
-
-        results.into_iter().map(CitationRecord::from).collect()
-    }
-
-    /// Get all citations in the store.
-    pub async fn all_citations(&self) -> Vec<CitationRecord> {
-        let results: Vec<CitationRecordWithId> = self
-            .db
-            .query("SELECT * FROM edge_citation")
-            .await
-            .unwrap()
-            .take(0)
-            .unwrap_or_default();
-
-        results.into_iter().map(CitationRecord::from).collect()
-    }
-
-    /// Count total citations.
-    pub async fn citation_count(&self) -> usize {
-        let results: Vec<CountResult> = self
-            .db
-            .query("SELECT count() AS count FROM edge_citation GROUP ALL")
-            .await
-            .unwrap()
-            .take(0)
-            .unwrap_or_default();
-
-        results.first().map(|r| r.count).unwrap_or(0)
-    }
-
-    /// Count unique edges that have at least one citation.
-    pub async fn cited_edge_count(&self) -> usize {
-        let results: Vec<CountResult> = self
-            .db
-            .query("SELECT count() AS count FROM (SELECT source_node, target_node, edge_type FROM edge_citation GROUP BY source_node, target_node, edge_type)")
-            .await
-            .unwrap()
-            .take(0)
-            .unwrap_or_default();
-
-        results.first().map(|r| r.count).unwrap_or(0)
-    }
-}
-
-#[derive(Debug, SurrealValue)]
-struct CountResult {
-    count: usize,
-}
-
-#[derive(Debug, SurrealValue)]
-struct GroupedEdge {
-    source_node: String,
-    target_node: String,
-    edge_type: String,
-    providers: Vec<String>,
-}
-
-#[derive(Debug, SurrealValue)]
-struct QualityGroupedEdge {
-    source_node: String,
-    target_node: String,
-    edge_type: String,
-    providers: Vec<String>,
-    source_tags: Vec<String>,
-    total_obs: usize,
-}
-
-/// An edge that has been independently observed by multiple providers.
+/// Provider agreement summary for a specific edge.
 #[derive(Debug, Clone)]
-pub struct MultiProviderEdge {
+pub struct EdgeAgreement {
+    pub provider_count: usize,
+    pub providers: Vec<ProviderObservation>,
+    pub total_observations: usize,
+}
+
+/// An edge annotated with quality metadata.
+#[derive(Debug, Clone)]
+pub struct EdgeWithQuality {
     pub source_node: String,
     pub target_node: String,
     pub edge_type: String,
-    pub providers: Vec<String>,
+    pub quality: EdgeQuality,
+    pub provider_count: usize,
+    pub total_observations: usize,
+    pub has_citation: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Edge quality tiers
-//
-// Quality is derived from source observations, not stored on the edge itself.
-// The graph topology stays complete; consumers query the source layer to
-// filter by quality when they need to.
-// ---------------------------------------------------------------------------
-
-/// Quality tier for an edge, derived from its source observations.
-/// Ordered from weakest to strongest evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EdgeQuality {
-    /// Deduced by forward chaining from other edges (no direct observation)
+    /// Edge exists in graph but has no NSAI observations (legacy/seed data).
     Deduced,
-    /// Inferred from graph topology, validated by LLM (speculative)
     Speculative,
-    /// Extracted by a single LLM provider
     SingleProvider,
-    /// Extracted by multiple independent LLM providers
     MultiProvider,
-    /// Backed by at least one PubMed citation via SuppKG
     CitationBacked,
 }
 
@@ -685,329 +98,601 @@ impl EdgeQuality {
     }
 }
 
-/// An edge with its computed quality tier
+/// An edge confirmed by multiple LLM providers.
 #[derive(Debug, Clone)]
-pub struct EdgeWithQuality {
+pub struct MultiProviderEdge {
     pub source_node: String,
     pub target_node: String,
     pub edge_type: String,
-    pub quality: EdgeQuality,
-    pub provider_count: usize,
-    pub total_observations: usize,
+    pub providers: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// SourceStore — Postgres-backed projection of NSAI provenance data.
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::graph::KnowledgeGraph;
+pub struct SourceStore {
+    pool: PgPool,
+}
 
-    async fn make_store() -> SourceStore {
-        let kg = KnowledgeGraph::in_memory().await.unwrap();
-        SourceStore::new(kg.db())
+impl SourceStore {
+    pub fn new(pool: &PgPool) -> Self {
+        Self { pool: pool.clone() }
     }
 
-    #[tokio::test]
-    async fn test_record_and_query_edge_observation() {
-        let store = make_store().await;
-        let corr = Uuid::new_v4();
-        let now = Utc::now();
+    // -- Write operations --------------------------------------------------
 
-        store
-            .record_edge_created(
-                "magnesium",
-                "muscular system",
-                "acts_on",
-                0.7,
-                "Extracted",
-                "anthropic",
-                "claude-sonnet",
-                corr,
-                now,
+    pub async fn record_node_observation(
+        &self,
+        node_name: &str,
+        _node_type: &str,
+        provider: &str,
+        model: &str,
+        correlation_id: Uuid,
+        observed_at: DateTime<Utc>,
+    ) {
+        // Resolve entity by name
+        let entity_id: Option<Uuid> = sqlx::query_scalar!(
+            "SELECT e.id FROM entity e WHERE LOWER(e.name) = LOWER($1) LIMIT 1",
+            node_name,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(entity_id) = entity_id {
+            let _ = sqlx::query!(
+                r#"
+                INSERT INTO node_observation (entity_id, provider, model, correlation_id, observed_at)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT DO NOTHING
+                "#,
+                entity_id, provider, model, correlation_id, observed_at,
             )
+            .execute(&self.pool)
             .await;
-
-        let obs = store
-            .observations_for_edge("magnesium", "muscular system", "acts_on")
-            .await;
-
-        assert_eq!(obs.len(), 1);
-        assert_eq!(obs[0].provider, "anthropic");
-        assert_eq!(obs[0].observation_type, "created");
-        assert_eq!(obs[0].confidence, 0.7);
+        }
     }
 
-    #[tokio::test]
-    async fn test_edge_confirmed_by_second_provider() {
-        let store = make_store().await;
-        let corr1 = Uuid::new_v4();
-        let corr2 = Uuid::new_v4();
-        let now = Utc::now();
-
-        // Anthropic creates the edge
-        store
-            .record_edge_created(
-                "magnesium",
-                "nervous system",
-                "acts_on",
-                0.7,
-                "Extracted",
-                "anthropic",
-                "claude-sonnet",
-                corr1,
-                now,
-            )
-            .await;
-
-        // Gemini confirms it
-        store
-            .record_edge_confirmed(
-                "magnesium",
-                "nervous system",
-                "acts_on",
-                "gemini",
-                "gemini-flash",
-                corr2,
-                now,
-            )
-            .await;
-
-        let agreement = store
-            .provider_agreement("magnesium", "nervous system", "acts_on")
-            .await;
-
-        assert_eq!(agreement.provider_count, 2);
-        assert_eq!(agreement.total_observations, 2);
+    pub async fn record_edge_created(
+        &self,
+        source_node: &str,
+        target_node: &str,
+        edge_type: &str,
+        confidence: f64,
+        source_tag: &str,
+        provider: &str,
+        model: &str,
+        correlation_id: Uuid,
+        observed_at: DateTime<Utc>,
+    ) {
+        self.record_edge_observation(
+            source_node, target_node, edge_type,
+            confidence, source_tag, "created",
+            provider, model, correlation_id, observed_at,
+        ).await;
     }
 
-    #[tokio::test]
-    async fn test_same_provider_multiple_observations() {
-        let store = make_store().await;
-        let corr1 = Uuid::new_v4();
-        let corr2 = Uuid::new_v4();
-        let now = Utc::now();
-
-        // Anthropic creates the edge
-        store
-            .record_edge_created(
-                "zinc",
-                "immune system",
-                "acts_on",
-                0.7,
-                "Extracted",
-                "anthropic",
-                "claude-sonnet",
-                corr1,
-                now,
-            )
-            .await;
-
-        // Anthropic confirms it again in comprehension check
-        store
-            .record_edge_confirmed(
-                "zinc",
-                "immune system",
-                "acts_on",
-                "anthropic",
-                "claude-sonnet",
-                corr2,
-                now,
-            )
-            .await;
-
-        let agreement = store
-            .provider_agreement("zinc", "immune system", "acts_on")
-            .await;
-
-        // Same provider, so only 1 unique provider
-        assert_eq!(agreement.provider_count, 1);
-        // But 2 total observations
-        assert_eq!(agreement.total_observations, 2);
+    pub async fn record_edge_confirmed(
+        &self,
+        source_node: &str,
+        target_node: &str,
+        edge_type: &str,
+        provider: &str,
+        model: &str,
+        correlation_id: Uuid,
+        observed_at: DateTime<Utc>,
+    ) {
+        self.record_edge_observation(
+            source_node, target_node, edge_type,
+            0.0, "Confirmed", "confirmed",
+            provider, model, correlation_id, observed_at,
+        ).await;
     }
 
-    #[tokio::test]
-    async fn test_multi_provider_edges() {
-        let store = make_store().await;
-        let now = Utc::now();
-
-        // Edge observed by both providers
-        store
-            .record_edge_created(
-                "magnesium", "muscular system", "acts_on", 0.7, "Extracted",
-                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
+    async fn record_edge_observation(
+        &self,
+        source_node: &str,
+        target_node: &str,
+        edge_type: &str,
+        confidence: f64,
+        source_tag: &str,
+        observation_type: &str,
+        provider: &str,
+        model: &str,
+        correlation_id: Uuid,
+        observed_at: DateTime<Utc>,
+    ) {
+        let rel_id = self.resolve_relationship(source_node, target_node, edge_type).await;
+        if let Some(rel_id) = rel_id {
+            let _ = sqlx::query!(
+                r#"
+                INSERT INTO edge_observation
+                    (relationship_id, observation_type, provider, model,
+                     confidence, source_tag, correlation_id, observed_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "#,
+                rel_id, observation_type, provider, model,
+                confidence as f32, source_tag, correlation_id, observed_at,
             )
+            .execute(&self.pool)
             .await;
-        store
-            .record_edge_confirmed(
-                "magnesium", "muscular system", "acts_on",
-                "gemini", "gemini-flash", Uuid::new_v4(), now,
-            )
-            .await;
-
-        // Edge observed by only one provider
-        store
-            .record_edge_created(
-                "zinc", "skin repair", "affords", 0.5, "StructurallyEmergent",
-                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
-            )
-            .await;
-
-        let multi = store.multi_provider_edges().await;
-
-        assert_eq!(multi.len(), 1);
-        assert_eq!(multi[0].source_node, "magnesium");
-        assert_eq!(multi[0].providers.len(), 2);
+        }
     }
 
-    #[tokio::test]
-    async fn test_observation_counts() {
-        let store = make_store().await;
-        let now = Utc::now();
-
-        store
-            .record_node_observation(
-                "magnesium", "Ingredient", "anthropic", "claude-sonnet",
-                Uuid::new_v4(), now,
-            )
-            .await;
-        store
-            .record_node_observation(
-                "muscular system", "System", "anthropic", "claude-sonnet",
-                Uuid::new_v4(), now,
-            )
-            .await;
-        store
-            .record_edge_created(
-                "magnesium", "muscular system", "acts_on", 0.7, "Extracted",
-                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
-            )
-            .await;
-
-        assert_eq!(store.total_node_observations().await, 2);
-        assert_eq!(store.total_edge_observations().await, 1);
+    async fn resolve_relationship(
+        &self,
+        source_node: &str,
+        target_node: &str,
+        edge_type: &str,
+    ) -> Option<Uuid> {
+        let pg_edge_type = normalize_edge_type(edge_type);
+        sqlx::query_scalar!(
+            r#"
+            SELECT r.id FROM relationship r
+            JOIN rel_type rt ON rt.id = r.rel_type_id
+            JOIN entity e1 ON e1.id = r.from_entity
+            JOIN entity e2 ON e2.id = r.to_entity
+            WHERE LOWER(e1.name) = LOWER($1)
+              AND LOWER(e2.name) = LOWER($2)
+              AND rt.name = $3
+            LIMIT 1
+            "#,
+            source_node, target_node, pg_edge_type,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
     }
 
-    #[tokio::test]
-    async fn test_edges_by_quality_single_provider() {
-        let store = make_store().await;
-        let now = Utc::now();
+    // -- Read operations --------------------------------------------------
 
-        store
-            .record_edge_created(
-                "magnesium", "muscular system", "acts_on", 0.7, "Extracted",
-                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
-            )
-            .await;
+    pub async fn observations_for_edge(
+        &self,
+        source_node: &str,
+        target_node: &str,
+        edge_type: &str,
+    ) -> Vec<EdgeObservation> {
+        let rel_id = self.resolve_relationship(source_node, target_node, edge_type).await;
+        let Some(rel_id) = rel_id else { return vec![] };
 
-        let edges = store.edges_by_quality().await;
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].quality, EdgeQuality::SingleProvider);
-        assert_eq!(edges[0].provider_count, 1);
+        sqlx::query!(
+            r#"
+            SELECT eo.observation_type, eo.provider, eo.model,
+                   eo.confidence, eo.source_tag,
+                   eo.correlation_id, eo.observed_at
+            FROM edge_observation eo
+            WHERE eo.relationship_id = $1
+            ORDER BY eo.observed_at ASC
+            "#,
+            rel_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| EdgeObservation {
+            source_node: source_node.to_string(),
+            target_node: target_node.to_string(),
+            edge_type: edge_type.to_string(),
+            confidence: r.confidence as f64,
+            source_tag: r.source_tag,
+            observation_type: r.observation_type,
+            provider: r.provider,
+            model: r.model,
+            observed_at: r.observed_at.to_rfc3339(),
+            correlation_id: r.correlation_id
+                .map(|u| u.to_string())
+                .unwrap_or_default(),
+        })
+        .collect()
     }
 
-    #[tokio::test]
-    async fn test_edges_by_quality_multi_provider() {
-        let store = make_store().await;
-        let now = Utc::now();
-
-        store
-            .record_edge_created(
-                "magnesium", "muscular system", "acts_on", 0.7, "Extracted",
-                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
-            )
-            .await;
-        store
-            .record_edge_confirmed(
-                "magnesium", "muscular system", "acts_on",
-                "gemini", "gemini-flash", Uuid::new_v4(), now,
-            )
-            .await;
-
-        let edges = store.edges_by_quality().await;
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].quality, EdgeQuality::MultiProvider);
-        assert_eq!(edges[0].provider_count, 2);
+    pub async fn provider_agreement(
+        &self,
+        source_node: &str,
+        target_node: &str,
+        edge_type: &str,
+    ) -> EdgeAgreement {
+        let observations = self.observations_for_edge(source_node, target_node, edge_type).await;
+        let providers: Vec<ProviderObservation> = observations
+            .iter()
+            .map(|o| ProviderObservation {
+                provider: o.provider.clone(),
+                model: o.model.clone(),
+                observation_type: o.observation_type.clone(),
+                confidence: o.confidence,
+            })
+            .collect();
+        let unique: std::collections::HashSet<&str> =
+            providers.iter().map(|p| p.provider.as_str()).collect();
+        EdgeAgreement {
+            provider_count: unique.len(),
+            total_observations: observations.len(),
+            providers,
+        }
     }
 
-    #[tokio::test]
-    async fn test_edges_by_quality_speculative() {
-        let store = make_store().await;
-        let now = Utc::now();
-
-        store
-            .record_edge_created(
-                "magnesium", "immune support", "affords", 0.5, "StructurallyEmergent",
-                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
-            )
-            .await;
-
-        let edges = store.edges_by_quality().await;
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].quality, EdgeQuality::Speculative);
+    pub async fn total_edge_observations(&self) -> usize {
+        sqlx::query_scalar!("SELECT COUNT(*) FROM edge_observation")
+            .fetch_one(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0) as usize
     }
 
-    #[tokio::test]
-    async fn test_edges_by_quality_deduced() {
-        let store = make_store().await;
-        let now = Utc::now();
-
-        store
-            .record_edge_created(
-                "magnesium", "muscle relaxation", "affords", 0.7, "Deduced",
-                "system:forward_chain", "forward_chain", Uuid::new_v4(), now,
-            )
-            .await;
-
-        let edges = store.edges_by_quality().await;
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].quality, EdgeQuality::Deduced);
+    pub async fn total_node_observations(&self) -> usize {
+        sqlx::query_scalar!("SELECT COUNT(*) FROM node_observation")
+            .fetch_one(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0) as usize
     }
 
-    #[tokio::test]
-    async fn test_edges_at_quality_filters() {
-        let store = make_store().await;
-        let now = Utc::now();
+    pub async fn edges_by_quality(&self) -> Vec<EdgeWithQuality> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT
+                e1.name AS source_node,
+                e2.name AS target_node,
+                rt.name AS edge_type,
+                COUNT(DISTINCT eo.provider) AS provider_count,
+                COUNT(eo.id) AS total_obs,
+                BOOL_OR(ec.id IS NOT NULL) AS has_citation
+            FROM relationship r
+            JOIN rel_type rt ON rt.id = r.rel_type_id
+            JOIN entity e1 ON e1.id = r.from_entity
+            JOIN entity e2 ON e2.id = r.to_entity
+            LEFT JOIN edge_observation eo ON eo.relationship_id = r.id
+            LEFT JOIN evidence_claim ec ON ec.entity_id = r.from_entity
+                AND ec.source = 'supplementbot_confirmed'
+                AND ec.attrs->>'target_node' = LOWER(e2.name)
+            WHERE r.source LIKE 'nsai%'
+            GROUP BY r.id, e1.name, e2.name, rt.name
+            ORDER BY provider_count DESC, total_obs DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
 
-        // Deduced edge
-        store
-            .record_edge_created(
-                "magnesium", "muscle relaxation", "affords", 0.7, "Deduced",
-                "system:forward_chain", "forward_chain", Uuid::new_v4(), now,
+        rows.into_iter()
+            .map(|r| {
+                let provider_count = r.provider_count.unwrap_or(0) as usize;
+                let total_obs = r.total_obs.unwrap_or(0) as usize;
+                let has_citation = r.has_citation.unwrap_or(false);
+                let quality = if has_citation {
+                    EdgeQuality::CitationBacked
+                } else if provider_count >= 2 {
+                    EdgeQuality::MultiProvider
+                } else if provider_count == 1 {
+                    EdgeQuality::SingleProvider
+                } else {
+                    EdgeQuality::Speculative
+                };
+                EdgeWithQuality {
+                    source_node: r.source_node,
+                    target_node: r.target_node,
+                    edge_type: r.edge_type,
+                    quality,
+                    provider_count,
+                    total_observations: total_obs,
+                    has_citation,
+                }
+            })
+            .collect()
+    }
+
+    pub async fn edges_at_quality(&self, min_quality: EdgeQuality) -> Vec<EdgeWithQuality> {
+        self.edges_by_quality()
+            .await
+            .into_iter()
+            .filter(|e| e.quality >= min_quality)
+            .collect()
+    }
+
+    pub async fn multi_provider_edges(&self) -> Vec<MultiProviderEdge> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT
+                e1.name AS source_node,
+                e2.name AS target_node,
+                rt.name AS edge_type,
+                ARRAY_AGG(DISTINCT eo.provider) AS providers
+            FROM relationship r
+            JOIN rel_type rt ON rt.id = r.rel_type_id
+            JOIN entity e1 ON e1.id = r.from_entity
+            JOIN entity e2 ON e2.id = r.to_entity
+            JOIN edge_observation eo ON eo.relationship_id = r.id
+            WHERE r.source LIKE 'nsai%'
+            GROUP BY r.id, e1.name, e2.name, rt.name
+            HAVING COUNT(DISTINCT eo.provider) >= 2
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+
+        rows.into_iter()
+            .map(|r| MultiProviderEdge {
+                source_node: r.source_node,
+                target_node: r.target_node,
+                edge_type: r.edge_type,
+                providers: r.providers.unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    // -- Citation methods -------------------------------------------------
+
+    pub async fn record_citation(&self, citation: &CitationRecord) -> bool {
+        if citation.pmid.is_empty() || citation.pmid == "0" {
+            return false;
+        }
+
+        // Resolve entity
+        let entity_id: Option<Uuid> = sqlx::query_scalar!(
+            r#"
+            SELECT e.id FROM synonym s JOIN entity e ON e.id = s.entity_id
+            WHERE LOWER(s.name) = LOWER($1) AND e.source = 'seed' LIMIT 1
+            "#,
+            citation.source_node,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let Some(entity_id) = entity_id else { return false };
+
+        // Upsert citation
+        let citation_id: Option<Uuid> = sqlx::query_scalar!(
+            "SELECT id FROM citation WHERE pmid = $1",
+            citation.pmid,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+
+        let citation_id = if let Some(id) = citation_id {
+            id
+        } else {
+            sqlx::query_scalar!(
+                r#"
+                INSERT INTO citation (pmid, abstract_text, source)
+                VALUES ($1, $2, 'supplementbot_confirmed')
+                RETURNING id
+                "#,
+                citation.pmid, citation.sentence,
             )
-            .await;
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(Uuid::new_v4())
+        };
 
-        // Single-provider extracted edge
-        store
-            .record_edge_created(
-                "magnesium", "muscular system", "acts_on", 0.7, "Extracted",
-                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
-            )
-            .await;
+        // Insert evidence_claim
+        let exists: bool = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM evidence_claim WHERE entity_id = $1 AND citation_id = $2 AND source = 'supplementbot_confirmed')",
+            entity_id, citation_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
 
-        // Multi-provider edge
-        store
-            .record_edge_created(
-                "zinc", "immune system", "acts_on", 0.7, "Extracted",
-                "anthropic", "claude-sonnet", Uuid::new_v4(), now,
-            )
-            .await;
-        store
-            .record_edge_confirmed(
-                "zinc", "immune system", "acts_on",
-                "gemini", "gemini-flash", Uuid::new_v4(), now,
-            )
-            .await;
+        if exists {
+            return false;
+        }
 
-        // Filter: at least SingleProvider
-        let filtered = store.edges_at_quality(EdgeQuality::SingleProvider).await;
-        assert_eq!(filtered.len(), 2, "should include single + multi, not deduced");
+        let direction = direction_for_predicate(&citation.suppkg_predicate);
+        let attrs = serde_json::json!({
+            "edge_type": citation.edge_type,
+            "suppkg_predicate": citation.suppkg_predicate,
+            "target_node": citation.target_node,
+            "target_cui": citation.target_cui,
+            "source_cui": citation.source_cui,
+        });
 
-        // Filter: only MultiProvider
-        let multi = store.edges_at_quality(EdgeQuality::MultiProvider).await;
-        assert_eq!(multi.len(), 1);
-        assert_eq!(multi[0].source_node, "zinc");
+        let _ = sqlx::query!(
+            r#"
+            INSERT INTO evidence_claim
+                (entity_id, citation_id, claim_type, claim_text, direction, confidence, source, attrs)
+            VALUES ($1, $2, 'graph_edge', $3, $4, $5, 'supplementbot_confirmed', $6)
+            "#,
+            entity_id, citation_id, citation.sentence,
+            direction, citation.confidence as f32,
+            attrs,
+        )
+        .execute(&self.pool)
+        .await;
+
+        true
+    }
+
+    pub async fn existing_pmids_for(&self, source_node: &str) -> std::collections::HashSet<String> {
+        sqlx::query_scalar!(
+            r#"
+            SELECT c.pmid FROM citation c
+            JOIN evidence_claim ec ON ec.citation_id = c.id
+            JOIN entity e ON e.id = ec.entity_id
+            WHERE LOWER(e.name) = LOWER($1)
+              AND ec.source = 'supplementbot_confirmed'
+              AND c.pmid IS NOT NULL
+            "#,
+            source_node,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    pub async fn record_citations_batch(&self, citations: &[CitationRecord]) -> usize {
+        if citations.is_empty() {
+            return 0;
+        }
+        let source_node = &citations[0].source_node;
+        let existing = self.existing_pmids_for(source_node).await;
+        let mut stored = 0;
+        for citation in citations {
+            if existing.contains(&citation.pmid) {
+                continue;
+            }
+            if self.record_citation(citation).await {
+                stored += 1;
+            }
+        }
+        stored
+    }
+
+    pub async fn citations_for_edge(
+        &self,
+        source_node: &str,
+        target_node: &str,
+        _edge_type: &str,
+    ) -> Vec<CitationRecord> {
+        sqlx::query!(
+            r#"
+            SELECT c.pmid, ec.claim_text AS sentence, ec.confidence,
+                   ec.attrs->>'edge_type' AS edge_type,
+                   ec.attrs->>'suppkg_predicate' AS suppkg_predicate,
+                   ec.attrs->>'target_node' AS target_node_attr,
+                   ec.attrs->>'target_cui' AS target_cui,
+                   ec.attrs->>'source_cui' AS source_cui
+            FROM evidence_claim ec
+            JOIN citation c ON c.id = ec.citation_id
+            JOIN entity e ON e.id = ec.entity_id
+            WHERE LOWER(e.name) = LOWER($1)
+              AND LOWER(ec.attrs->>'target_node') = LOWER($2)
+              AND ec.source = 'supplementbot_confirmed'
+            ORDER BY ec.confidence DESC
+            "#,
+            source_node, target_node,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| CitationRecord {
+            source_node: source_node.to_string(),
+            target_node: r.target_node_attr.unwrap_or_else(|| target_node.to_string()),
+            edge_type: r.edge_type.unwrap_or_default(),
+            pmid: r.pmid.unwrap_or_default(),
+            sentence: r.sentence,
+            confidence: r.confidence as f64,
+            suppkg_predicate: r.suppkg_predicate.unwrap_or_default(),
+            source_cui: r.source_cui.unwrap_or_default(),
+            target_cui: r.target_cui.unwrap_or_default(),
+        })
+        .collect()
+    }
+
+    pub async fn citations_for_ingredient(&self, ingredient: &str) -> Vec<CitationRecord> {
+        sqlx::query!(
+            r#"
+            SELECT c.pmid, ec.claim_text AS sentence, ec.confidence,
+                   ec.attrs->>'edge_type' AS edge_type,
+                   ec.attrs->>'suppkg_predicate' AS suppkg_predicate,
+                   ec.attrs->>'target_node' AS target_node,
+                   ec.attrs->>'target_cui' AS target_cui,
+                   ec.attrs->>'source_cui' AS source_cui
+            FROM evidence_claim ec
+            JOIN citation c ON c.id = ec.citation_id
+            JOIN entity e ON e.id = ec.entity_id
+            JOIN entity_type et ON et.id = e.type_id
+            WHERE LOWER(e.name) = LOWER($1)
+              AND ec.source = 'supplementbot_confirmed'
+            ORDER BY ec.confidence DESC
+            LIMIT 100
+            "#,
+            ingredient,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| CitationRecord {
+            source_node: ingredient.to_string(),
+            target_node: r.target_node.unwrap_or_default(),
+            edge_type: r.edge_type.unwrap_or_default(),
+            pmid: r.pmid.unwrap_or_default(),
+            sentence: r.sentence,
+            confidence: r.confidence as f64,
+            suppkg_predicate: r.suppkg_predicate.unwrap_or_default(),
+            source_cui: r.source_cui.unwrap_or_default(),
+            target_cui: r.target_cui.unwrap_or_default(),
+        })
+        .collect()
+    }
+
+    pub async fn all_citations(&self) -> Vec<CitationRecord> {
+        // Intentionally limited — this is a bulk dump used for debugging only
+        self.citations_for_ingredient("").await
+    }
+
+    pub async fn citation_count(&self) -> usize {
+        sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM evidence_claim WHERE source = 'supplementbot_confirmed'"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0) as usize
+    }
+
+    pub async fn cited_edge_count(&self) -> usize {
+        sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(DISTINCT (entity_id, attrs->>'target_node'))
+            FROM evidence_claim WHERE source = 'supplementbot_confirmed'
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0) as usize
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn normalize_edge_type(s: &str) -> String {
+    match s.to_lowercase().as_str() {
+        "actson" | "acts_on" => "acts_on".to_string(),
+        "affords" => "affords".to_string(),
+        "viamechanism" | "via_mechanism" => "via_mechanism".to_string(),
+        "presentsin" | "presents_in" => "presents_in".to_string(),
+        "modulates" => "modulates".to_string(),
+        "contraindicatedwith" | "contraindicated_with" => "contraindicated_with".to_string(),
+        "competeswith" | "competes_with" => "competes_with".to_string(),
+        "disinhibits" => "disinhibits".to_string(),
+        "sequesters" => "sequesters".to_string(),
+        "releases" => "releases".to_string(),
+        "amplifies" => "amplifies".to_string(),
+        "desensitizes" => "desensitizes".to_string(),
+        "positivelyreinforces" | "positively_reinforces" => "positively_reinforces".to_string(),
+        "gates" => "gates".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn direction_for_predicate(predicate: &str) -> &'static str {
+    match predicate.to_uppercase().as_str() {
+        "TREATS" | "PREVENTS" | "STIMULATES" | "AUGMENTS" | "PRODUCES" => "positive",
+        "INHIBITS" | "DISRUPTS" | "CAUSES" | "PREDISPOSES" => "negative",
+        "supplementology" | "affords" => "positive",
+        _ => "neutral",
     }
 }

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(DISTINCT (entity_id, attrs->>'target_node'))\n            FROM evidence_claim WHERE source = 'supplementbot_confirmed'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "41f9abfa470215fbb6737765183f499e7c41a3257880b1245105f10d7f5394ac"
+}

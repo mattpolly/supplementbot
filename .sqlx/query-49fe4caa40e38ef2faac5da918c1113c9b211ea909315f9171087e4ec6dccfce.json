@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT e.id FROM synonym s\n            JOIN entity e ON e.id = s.entity_id\n            WHERE LOWER(s.name) = LOWER($1)\n            AND e.source = 'seed'\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "49fe4caa40e38ef2faac5da918c1113c9b211ea909315f9171087e4ec6dccfce"
+}

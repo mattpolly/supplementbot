@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT eo.observation_type, eo.provider, eo.model,\n                   eo.confidence, eo.source_tag,\n                   eo.correlation_id, eo.observed_at\n            FROM edge_observation eo\n            WHERE eo.relationship_id = $1\n            ORDER BY eo.observed_at ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "observation_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "provider",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "model",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "confidence",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 4,
+        "name": "source_tag",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "correlation_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "observed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "aef710b4f7a5c5f2f575c4aa178f1afd060738f9571cdb0231342e2f38fcf860"
+}

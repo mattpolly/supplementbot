@@ -289,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn test_citation_backing_finds_match_via_merge_store() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
-        let source_store = SourceStore::new(kg.db());
+        let source_store = SourceStore::new(kg.pool());
         let merge_store = MergeStore::new(kg.db());
         let registry = IngredientRegistry::new(kg.db());
         let sink = MemorySink::new();
@@ -337,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn test_citation_backing_no_cui_no_match() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
-        let source_store = SourceStore::new(kg.db());
+        let source_store = SourceStore::new(kg.pool());
         let merge_store = MergeStore::new(kg.db());
         let registry = IngredientRegistry::new(kg.db());
         let sink = MemorySink::new();
@@ -363,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn test_citation_backing_uses_hardcoded_cui() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
-        let source_store = SourceStore::new(kg.db());
+        let source_store = SourceStore::new(kg.pool());
         let merge_store = MergeStore::new(kg.db());
         let registry = IngredientRegistry::new(kg.db());
         let sink = MemorySink::new();
@@ -403,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn test_citation_backing_sentence_search_fallback() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
-        let source_store = SourceStore::new(kg.db());
+        let source_store = SourceStore::new(kg.pool());
         let merge_store = MergeStore::new(kg.db());
         let registry = IngredientRegistry::new(kg.db());
         let sink = MemorySink::new();
@@ -463,7 +463,7 @@ mod tests {
     #[tokio::test]
     async fn test_citation_backing_dedup_on_rerun() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
-        let source_store = SourceStore::new(kg.db());
+        let source_store = SourceStore::new(kg.pool());
         let merge_store = MergeStore::new(kg.db());
         let registry = IngredientRegistry::new(kg.db());
         let sink = MemorySink::new();

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT e.id FROM entity e\n            JOIN entity_type et ON et.id = e.type_id\n            WHERE et.name = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f7fb9aca295d24b7e0209b392d23d9ba622e7b6f449daeba2d7d385112234e4e"
+}

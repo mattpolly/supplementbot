@@ -50,6 +50,7 @@ pub struct AppStateInner {
 
 impl AppState {
     pub async fn init(
+        pg_url: &str,
         db_url: &str,
         db_user: &str,
         db_pass: &str,
@@ -61,12 +62,12 @@ impl AppState {
         session_timeout_secs: u64,
         ip_daily_cap: usize,
     ) -> Self {
-        // Connect to SurrealDB server
-        let graph = KnowledgeGraph::open(db_url, db_user, db_pass)
+        // Connect to supplementology Postgres (supplement KB) + SurrealDB (intake graph)
+        let graph = KnowledgeGraph::open(pg_url, db_url, db_user, db_pass)
             .await
-            .expect("failed to connect to knowledge graph database");
+            .expect("failed to connect to knowledge graph databases");
 
-        let source = SourceStore::new(graph.db());
+        let source = SourceStore::new(graph.pool());
         let merge = MergeStore::new(graph.db());
 
         // Initialize intake KG services (same DB, intake_-prefixed tables)
@@ -274,7 +275,7 @@ fn default_model_for(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "claude-sonnet-4-20250514",
         "gemini" => "gemini-2.5-pro-preview-05-06",
-        "xai" => "grok-3",
+        "xai" => "grok-4-1-fast-reasoning",
         _ => "unknown",
     }
 }

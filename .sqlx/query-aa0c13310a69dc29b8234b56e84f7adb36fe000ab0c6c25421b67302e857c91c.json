@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO evidence_claim\n                (entity_id, citation_id, claim_type, claim_text, direction, confidence, source, attrs)\n            VALUES ($1, $2, 'graph_edge', $3, $4, $5, 'supplementbot_confirmed', $6)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Float4",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aa0c13310a69dc29b8234b56e84f7adb36fe000ab0c6c25421b67302e857c91c"
+}

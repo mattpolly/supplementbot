@@ -151,118 +151,79 @@ Custom values work: `ComplexityLens::new(0.35)` sees `contraindicated_with` (0.3
 
 **Crate:** `graph-service` — `crates/graph-service/src/graph.rs`
 
-Backed by **SurrealDB server** (RocksDB storage engine). The graph is served by a dedicated `surrealdb` systemd service and accessed over WebSocket. Both the CLI and web server connect as clients — no file locking, concurrent reads and writes work correctly.
+The supplement knowledge base is backed by **PostgreSQL** (supplementology, port 5433). The graph reads from the `entity`, `relationship`, `rel_type`, `entity_type`, `evidence_claim`, `citation`, `edge_observation`, and `node_observation` tables — the same schema supplementology owns and migrates.
 
-Connection is configured via environment variables: `DB_URL` (default `ws://localhost:8000`), `DB_USER`, `DB_PASS`. These are set in `.env` and picked up by both binaries at startup.
+Connection is configured via `SUPPLEMENTOLOGY_DATABASE_URL` (default: `postgresql://supplementology:supplementology@localhost:5433/supplementology`).
 
-Nodes are stored as SurrealDB records in the `node` table. Edges are stored as SurrealDB graph relations using `RELATE node:src->edge->node:tgt`. This gives us native graph traversal capabilities and persistence for free.
+**SurrealDB** (port 8000, RocksDB engine) is retained for the intake knowledge graph, explore endpoints, merge table, and ingredient registry — runtime state that supplementology does not own. Connection via `DB_URL`, `DB_USER`, `DB_PASS`.
+
+`KnowledgeGraph` holds both connections:
+```rust
+pub struct KnowledgeGraph {
+    pool: PgPool,       // supplement KB — read from supplementology
+    db: Surreal<Any>,   // intake KG, merge, registry — NSAI runtime state
+}
+```
 
 ### Key Operations
 
-All graph operations are **async** since they go over the WebSocket connection.
+All graph operations are **async**.
 
 | Method | Description |
 |--------|-------------|
-| `KnowledgeGraph::open(url, user, pass)` | Connect to the SurrealDB server |
-| `KnowledgeGraph::open_embedded(path)` | Open an embedded RocksDB graph (migrate command only) |
-| `KnowledgeGraph::in_memory()` | Create an in-memory graph (for tests) |
-| `add_node(NodeData)` | Adds or returns existing (deduplicates by slugified name) |
-| `find_node(&str)` | Case-insensitive lookup by slugified name |
-| `add_edge(&src, &tgt, EdgeData)` | Creates a `RELATE` graph edge |
-| `outgoing_edges(&idx)` | All `(NodeIndex, EdgeData)` pairs via `SELECT FROM edge WHERE in = $node` |
-| `incoming_edges(&idx)` | All `(NodeIndex, EdgeData)` pairs via `SELECT FROM edge WHERE out = $node` |
-| `nodes_by_type(&NodeType)` | Filter nodes by type |
-| `all_nodes()` | All node indices for iteration |
-| `node_count()` / `edge_count()` | Graph size via `SELECT count() GROUP ALL` |
-| `boost_edge_confidence(&src, &tgt, &type, boost)` | Increase confidence on matching edges (capped at 1.0) |
-| `dump()` | Human-readable graph dump |
+| `KnowledgeGraph::open(pg_url, surreal_url, user, pass)` | Connect to both Postgres and SurrealDB |
+| `KnowledgeGraph::in_memory()` | In-memory SurrealDB (for tests; Postgres still needed) |
+| `pool()` | Returns `&PgPool` — used by `SourceStore` |
+| `db()` | Returns `&Surreal<Any>` — used by `MergeStore`, `IntakeGraphStore`, explore endpoints |
+| `add_node(NodeData)` | Upsert into `entity` (deduplicates by slugified name) |
+| `find_node(&str)` | Case-insensitive lookup by name via `entity` |
+| `add_edge(&src, &tgt, EdgeData)` | Upsert into `relationship` |
+| `outgoing_edges(&idx)` | All `(NodeIndex, EdgeData)` pairs from `relationship WHERE from_entity = $id` |
+| `incoming_edges(&idx)` | All `(NodeIndex, EdgeData)` pairs from `relationship WHERE to_entity = $id` |
+| `nodes_by_type(&NodeType)` | Filter `entity` by `entity_type.name` |
+| `node_count()` / `edge_count()` | `COUNT(*)` on `entity` / `relationship` |
+| `known_ingredients()` | All `Ingredient`-typed entity names |
+| `boost_edge_confidence(...)` | `UPDATE relationship SET confidence = ...` (capped at 1.0) |
 
-**Source layer queries** (via `SourceStore`, same DB):
+**Source layer queries** (via `SourceStore`, backed by Postgres):
 
 | Method | Description |
 |--------|-------------|
-| `edges_by_quality()` | Classify all edges by quality tier (Deduced → Speculative → SingleProvider → MultiProvider) |
+| `edges_by_quality()` | Classify all NSAI edges by quality tier (Deduced → CitationBacked) |
 | `edges_at_quality(min)` | Filter to edges at or above a quality threshold |
-| `multi_provider_edges()` | All edges confirmed by 2+ providers |
+| `multi_provider_edges()` | All edges confirmed by 2+ providers via `edge_observation` |
 | `provider_agreement(src, tgt, type)` | Full observation details for any edge |
+| `citations_for_ingredient(name)` | All `evidence_claim` rows for an ingredient |
 
-Nodes are deduplicated by slugified lowercase name (spaces → underscores, non-alphanumeric stripped). Edges are deduplicated by (source, target, edge_type) in the extraction parser, not in the graph itself.
+### NodeIndex
+
+`NodeIndex` wraps a `Uuid` (the `entity.id` primary key). Previously wrapped a SurrealDB `RecordId`.
+
+```rust
+pub struct NodeIndex(pub Uuid);
+```
+
+### Quality Tiers
+
+```
+Deduced         — edge exists in graph but has no NSAI observations (legacy/seed data)
+Speculative     — 1 provider, low confidence
+SingleProvider  — 1 provider, normal confidence
+MultiProvider   — 2+ providers agree
+CitationBacked  — has at least one PubMed evidence_claim
+```
 
 ### Persistence Model
 
-The graph database lives at `/srv/www/supplementbot/data/graph-server`, owned by the `surrealdb` systemd service. The service starts before `supplementbot-web` and must be running for either binary to connect.
+All supplement KB data lives in supplementology's Postgres. The `surrealdb` systemd service at `/srv/www/supplementbot/data/graph-server` is still required for the intake KG.
 
-Running the CLI multiple times with different nutraceuticals builds up the same graph — the web server sees new ingredients immediately without restart:
+Running the CLI ingests new ingredients into Postgres — the web server sees them immediately without restart since both share the same `PgPool`.
 
-```bash
-cargo run --bin supplementbot -- -n Magnesium -p anthropic   # ingests into server
-cargo run --bin supplementbot -- -n Zinc -p anthropic         # adds to same graph
-# Web server sees both immediately; no restart needed
-```
+### Database Sync
 
-### Database Sync (bodhi ↔ local)
+Supplement KB data is managed via supplementology's ETL pipeline and Alembic migrations. There is no longer a `surreal export/import` step for supplement data.
 
-The production server (`newark` / bodhi) and local dev machine (`beehive`) each run their own SurrealDB instance. Use `surreal export`/`import` over HTTP (not WebSocket — WS backup is unsupported in v3+).
-
-**Pull from bodhi → local (refresh local test data):**
-
-```bash
-# 1. Export from bodhi
-ssh newark "surreal export \
-  --endpoint http://localhost:8000 \
-  --username root --password supplement123 \
-  --namespace supplementbot --database supplementbot \
-  /tmp/graph-export.surql"
-
-# 2. Copy to local
-scp newark:/tmp/graph-export.surql /srv/www/supplementbot/data/graph-export.surql
-
-# 3. Import locally (stops and restarts to avoid conflicts)
-surreal import \
-  --endpoint http://localhost:8000 \
-  --username root --password root \
-  --namespace supplementbot --database supplementbot \
-  /srv/www/supplementbot/data/graph-export.surql
-```
-
-**Push local → bodhi (promote local training data to production):**
-
-```bash
-# 1. Export from local
-surreal export \
-  --endpoint http://localhost:8000 \
-  --username root --password root \
-  --namespace supplementbot --database supplementbot \
-  /srv/www/supplementbot/data/graph-export.surql
-
-# 2. Copy to bodhi
-scp /srv/www/supplementbot/data/graph-export.surql newark:/tmp/graph-export.surql
-
-# 3. Import on bodhi
-ssh newark "surreal import \
-  --endpoint http://localhost:8000 \
-  --username root --password supplement123 \
-  --namespace supplementbot --database supplementbot \
-  /tmp/graph-export.surql"
-```
-
-Credentials: bodhi uses `supplement123`, local uses `root`. SSH via `newark` (resolves to bodhi). No restart of `supplementbot-web` is needed after import — it reconnects automatically.
-
-### Data Migration
-
-If moving from an older embedded RocksDB graph to server mode, use the migrate subcommand:
-
-```bash
-supplementbot migrate --from /path/to/old/embedded/graph
-```
-
-This opens the embedded graph directly, connects to the server via `DB_URL`/`DB_USER`/`DB_PASS`, and copies all tables: `node`, `edge`, `node_source`, `edge_source`, `node_alias`, `node_cui`. Intake KG and iDISK data are excluded — both regenerate at startup.
-
-Note: `surreal start file://` uses a different internal format than the embedded Rust SDK. Use `rocksdb://` as the path scheme when starting the server:
-
-```bash
-surreal start --username root --password <pass> rocksdb:///path/to/data
-```
+The intake KG (SurrealDB) still needs manual sync if moving between environments — use `surreal export/import` over HTTP for the `supplementbot` namespace only.
 
 ---
 
@@ -633,17 +594,26 @@ Axum-based WebSocket server hosting the intake agent.
 
 ### Shared State (`AppState`)
 
-- `graph: KnowledgeGraph` — supplement KG (connected to SurrealDB server)
-- `source: SourceStore` — edge quality metadata
-- `merge: MergeStore` — synonym resolution
-- `intake_store: IntakeGraphStore` — intake KG (process graph, same DB connection, `intake_`-prefixed tables)
+- `graph: KnowledgeGraph` — supplement KG (`PgPool` → supplementology) + intake KG (`Surreal<Any>` → SurrealDB)
+- `source: SourceStore` — edge quality metadata, backed by Postgres (`edge_observation`, `node_observation`, `evidence_claim`)
+- `merge: MergeStore` — synonym resolution, backed by SurrealDB (NSAI runtime state)
+- `intake_store: IntakeGraphStore` — intake KG (process graph, SurrealDB `intake_`-prefixed tables)
 - `idisk: IdiskImporter` — iDISK 2.0 data (drug interactions, adverse reactions, mechanisms)
-- `suppkg: Option<Arc<SuppKg>>` — SuppKG citation index (PubMed PMIDs + sentences), loaded if `SUPPKG_PATH` is set
 - `renderer: Arc<dyn LlmProvider>` — expensive conversational LLM (env: RENDERER_PROVIDER/RENDERER_MODEL)
 - `extractor: Arc<dyn LlmProvider>` — cheap extraction LLM (env: EXTRACTOR_PROVIDER/EXTRACTOR_MODEL)
 - `sessions: SessionManager` — rate limiting and session tracking
 - `safety_filter: SafetyFilter` — compiled regex patterns
 - `archetype_coverage: Vec<ArchetypeCoverage>` — per-archetype coverage strength cached at startup (Strong/Moderate/Weak)
+
+**Environment variables required at startup:**
+- `SUPPLEMENTOLOGY_DATABASE_URL` — Postgres connection string for supplementology
+- `DB_URL` / `DB_USER` / `DB_PASS` — SurrealDB for intake KG
+- `RENDERER_PROVIDER` / `RENDERER_MODEL` — conversational LLM
+- `EXTRACTOR_PROVIDER` / `EXTRACTOR_MODEL` — extraction LLM
+- `STATIC_DIR` — path to compiled frontend
+- `IDISK_DATA_DIR` (optional) — iDISK CSV directory
+- `SUPPKG_PATH` (optional) — SuppKG JSON for citation lookup
+- `INGREDIENT_NAMES_PATH` (optional) — safety filter known supplement terms
 
 At startup, `init()` seeds the intake graph (idempotent), optionally imports iDISK data from `IDISK_DATA_DIR`, loads SuppKG if `SUPPKG_PATH` is set, and computes archetype coverage via `QueryEngine::coverage_by_archetype()`.
 

@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO edge_observation\n                    (relationship_id, observation_type, provider, model,\n                     confidence, source_tag, correlation_id, observed_at)\n                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Float4",
+        "Text",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3f5630932c37c0783f5176563ceab7d0f396f4831deefcdcd5547c2967bb98a5"
+}

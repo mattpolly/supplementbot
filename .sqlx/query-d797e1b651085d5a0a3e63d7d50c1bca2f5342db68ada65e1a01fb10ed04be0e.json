@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                e1.name AS source_node,\n                e2.name AS target_node,\n                rt.name AS edge_type,\n                ARRAY_AGG(DISTINCT eo.provider) AS providers\n            FROM relationship r\n            JOIN rel_type rt ON rt.id = r.rel_type_id\n            JOIN entity e1 ON e1.id = r.from_entity\n            JOIN entity e2 ON e2.id = r.to_entity\n            JOIN edge_observation eo ON eo.relationship_id = r.id\n            WHERE r.source LIKE 'nsai%'\n            GROUP BY r.id, e1.name, e2.name, rt.name\n            HAVING COUNT(DISTINCT eo.provider) >= 2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_node",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "target_node",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "edge_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "providers",
+        "type_info": "TextArray"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "d797e1b651085d5a0a3e63d7d50c1bca2f5342db68ada65e1a01fb10ed04be0e"
+}
