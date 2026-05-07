@@ -168,6 +168,11 @@ fn pg_url() -> String {
     })
 }
 
+fn api_url() -> String {
+    std::env::var("SUPPLEMENTOLOGY_API_URL")
+        .unwrap_or_else(|_| "http://localhost:3001".to_string())
+}
+
 fn build_provider(cli: &Cli) -> Result<Box<dyn LlmProvider>, String> {
     match cli.provider.as_str() {
         "anthropic" => {
@@ -318,7 +323,7 @@ async fn run_migrate(_from: &str) {
 async fn run_confirm_edges(ingredient: Option<String>, supplementology_url: String) {
     let (db_url, db_user, db_pass) = db_connection();
 
-    let graph = KnowledgeGraph::open(&pg_url(), &db_url, &db_user, &db_pass).await
+    let graph = KnowledgeGraph::open(&pg_url(), &api_url(), &db_url, &db_user, &db_pass).await
         .expect("failed to connect to graph DB");
     let source_store = SourceStore::new(graph.pool());
 
@@ -476,7 +481,7 @@ async fn run_query(
     min_confidence: Option<f64>,
 ) {
     let (db_url, db_user, db_pass) = db_connection();
-    let graph = match KnowledgeGraph::open(&pg_url(), &db_url, &db_user, &db_pass).await {
+    let graph = match KnowledgeGraph::open(&pg_url(), &api_url(), &db_url, &db_user, &db_pass).await {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error opening graph database: {}", e);
@@ -690,7 +695,7 @@ async fn main() {
     };
 
     // Connect to supplementology Postgres + SurrealDB (intake graph)
-    let graph = match KnowledgeGraph::open(&pg_url(), &db_path, &db_user, &db_pass).await {
+    let graph = match KnowledgeGraph::open(&pg_url(), &api_url(), &db_path, &db_user, &db_pass).await {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error opening graph database: {}", e);

@@ -4,6 +4,7 @@ use surrealdb::opt::auth::Root;
 use surrealdb::Surreal;
 use uuid::Uuid;
 
+use crate::client::SupplementClient;
 use crate::export::{ExportEdge, ExportGraph, ExportNode};
 use crate::types::*;
 
@@ -60,19 +61,24 @@ pub struct KnowledgeGraph {
     pub(crate) pool: PgPool,
     /// Retained for intake graph store, iDISK, and explore endpoints.
     db: Surreal<Any>,
+    /// HTTP client for read queries — routes through supplementology API.
+    api: SupplementClient,
 }
 
 impl KnowledgeGraph {
-    /// Connect to supplementology Postgres (supplement KB) and SurrealDB (intake graph).
-    /// `pg_url` is the Postgres connection string.
-    /// `surreal_url/user/pass` are the SurrealDB credentials (intake graph only).
+    /// Connect to supplementology Postgres (writes) + SurrealDB (intake graph) + API (reads).
+    /// `pg_url` — Postgres connection string (NSAI write path only).
+    /// `api_url` — supplementology API base URL for read queries.
+    /// `surreal_url/user/pass` — SurrealDB credentials (intake graph only).
     pub async fn open(
         pg_url: &str,
+        api_url: &str,
         surreal_url: &str,
         surreal_user: &str,
         surreal_pass: &str,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let pool = PgPool::connect(pg_url).await?;
+        let api = SupplementClient::new(api_url);
         let db = surrealdb::engine::any::connect(surreal_url).await?;
         db.signin(Root {
             username: surreal_user.to_string(),
@@ -80,24 +86,24 @@ impl KnowledgeGraph {
         })
         .await?;
         db.use_ns("supplementbot").use_db("supplementbot").await?;
-        // Ensure intake graph relation table exists
         let _: surrealdb::Result<Vec<serde_json::Value>> = db
             .query("DEFINE TABLE IF NOT EXISTS edge TYPE RELATION IN node OUT node")
             .await
             .and_then(|mut r| r.take(0));
-        Ok(Self { pool, db })
+        Ok(Self { pool, db, api })
     }
 
-    /// Create an in-memory graph for tests (Postgres only — no intake graph).
+    /// Create an in-memory graph for tests (Postgres + in-memory SurrealDB).
     pub async fn in_memory() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = PgPool::connect(
-            &std::env::var("SUPPLEMENTOLOGY_DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://supplementology:supplementology@localhost:5433/supplementology".to_string()),
-        )
-        .await?;
+        let pg_url = std::env::var("SUPPLEMENTOLOGY_DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://supplementology:supplementology@localhost:5433/supplementology".to_string());
+        let api_url = std::env::var("SUPPLEMENTOLOGY_API_URL")
+            .unwrap_or_else(|_| "http://localhost:3001".to_string());
+        let pool = PgPool::connect(&pg_url).await?;
+        let api = SupplementClient::new(&api_url);
         let db = surrealdb::engine::any::connect("memory").await?;
         db.use_ns("supplementbot").use_db("supplementbot").await?;
-        Ok(Self { pool, db })
+        Ok(Self { pool, db, api })
     }
 
     /// Get the SurrealDB handle (for intake graph store, iDISK, explore endpoints).
@@ -105,9 +111,14 @@ impl KnowledgeGraph {
         &self.db
     }
 
-    /// Get the Postgres pool (for SourceStore, MergeStore, IngredientRegistry).
+    /// Get the Postgres pool (for SourceStore writes and NSAI loop mutations).
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Get the supplementology API HTTP client (for read queries in web-server / query engine).
+    pub fn api(&self) -> &SupplementClient {
+        &self.api
     }
 
     // -- Node operations --------------------------------------------------
@@ -146,41 +157,17 @@ impl KnowledgeGraph {
         self.find_node(&data.name).await.unwrap_or(NodeIndex(Uuid::new_v4()))
     }
 
-    /// Look up a node by name (case-insensitive, checks entity name then synonyms).
+    /// Look up a node by name (case-insensitive). Routes through API.
     pub async fn find_node(&self, name: &str) -> Option<NodeIndex> {
-        // Check entity name first
-        let row = sqlx::query_scalar!(
-            "SELECT e.id FROM entity e WHERE LOWER(e.name) = LOWER($1) LIMIT 1",
-            name,
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten();
-
-        if let Some(id) = row {
-            return Some(NodeIndex(id));
-        }
-
-        // Check synonyms
-        sqlx::query_scalar!(
-            r#"
-            SELECT e.id FROM synonym s
-            JOIN entity e ON e.id = s.entity_id
-            WHERE LOWER(s.name) = LOWER($1)
-            AND e.source = 'seed'
-            LIMIT 1
-            "#,
-            name,
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten()
-        .map(NodeIndex)
+        self.api.find_node(name).await.map(|(idx, _)| idx)
     }
 
-    /// Get node data by index.
+    /// Look up a node by name and return both index and data. Routes through API.
+    pub async fn find_node_with_data(&self, name: &str) -> Option<(NodeIndex, NodeData)> {
+        self.api.find_node(name).await
+    }
+
+    /// Get node data by index. Falls back to direct Postgres (index-based lookup not in API).
     pub async fn node_data(&self, idx: &NodeIndex) -> Option<NodeData> {
         let row = sqlx::query_as!(
             EntityRow,
@@ -201,40 +188,14 @@ impl KnowledgeGraph {
         Some(NodeData::new(row.name, node_type))
     }
 
-    /// Get all nodes of a given type.
+    /// Get all nodes of a given type. Routes through API.
     pub async fn nodes_by_type(&self, node_type: &NodeType) -> Vec<NodeIndex> {
-        let type_name = node_type_to_pg(node_type);
-        sqlx::query_scalar!(
-            r#"
-            SELECT e.id FROM entity e
-            JOIN entity_type et ON et.id = e.type_id
-            WHERE et.name = $1
-            "#,
-            type_name,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(NodeIndex)
-        .collect()
+        self.api.nodes_by_type(node_type).await
     }
 
-    /// Return all seeded ingredient names, sorted alphabetically.
+    /// Return all seeded ingredient names, sorted alphabetically. Routes through API.
     pub async fn known_ingredients(&self) -> Vec<String> {
-        sqlx::query_scalar!(
-            r#"
-            SELECT e.name FROM entity e
-            JOIN entity_type et ON et.id = e.type_id
-            WHERE et.name IN ('organism', 'compound')
-              AND e.source = 'seed'
-              AND e.slug != 'dsld_ingredient_registry'
-            ORDER BY e.name ASC
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default()
+        self.api.known_ingredients().await
     }
 
     /// Find a node by name, with alias fallback via MergeStore.
@@ -291,55 +252,14 @@ impl KnowledgeGraph {
         let _ = source_str; // suppress unused warning
     }
 
-    /// Get all outgoing edges from a node.
+    /// Get all outgoing edges from a node. Routes through API.
     pub async fn outgoing_edges(&self, idx: &NodeIndex) -> Vec<(NodeIndex, EdgeData)> {
-        self.fetch_edges_where("r.from_entity = $1", idx.0).await
+        self.api.outgoing_edges(idx, 0.0).await
     }
 
-    /// Get all incoming edges to a node.
+    /// Get all incoming edges to a node. Routes through API.
     pub async fn incoming_edges(&self, idx: &NodeIndex) -> Vec<(NodeIndex, EdgeData)> {
-        self.fetch_edges_where("r.to_entity = $1", idx.0).await
-    }
-
-    async fn fetch_edges_where(&self, condition: &str, entity_id: Uuid) -> Vec<(NodeIndex, EdgeData)> {
-        let rows = sqlx::query!(
-            r#"
-            SELECT r.id, r.from_entity, r.to_entity,
-                   rt.name AS rel_type_name,
-                   r.confidence, r.complexity, r.source, r.attrs
-            FROM relationship r
-            JOIN rel_type rt ON rt.id = r.rel_type_id
-            WHERE r.from_entity = $1 OR r.to_entity = $1
-            ORDER BY r.confidence DESC
-            "#,
-            entity_id,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-
-        let is_outgoing = condition.contains("from_entity");
-
-        rows.into_iter()
-            .filter(|r| {
-                if is_outgoing { r.from_entity == entity_id }
-                else { r.to_entity == entity_id }
-            })
-            .filter_map(|r| {
-                let edge_type = pg_to_edge_type(&r.rel_type_name)?;
-                let other = if is_outgoing { r.to_entity } else { r.from_entity };
-                let metadata = EdgeMetadata {
-                    confidence: r.confidence as f64,
-                    source: pg_source_to_source(&r.source),
-                    iteration: r.attrs.get("iteration").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-                    epoch: r.attrs.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    llm_agreement: None,
-                    reasoning_depth: r.attrs.get("reasoning_depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    extra: std::collections::HashMap::new(),
-                };
-                Some((NodeIndex(other), EdgeData::new(edge_type, metadata)))
-            })
-            .collect()
+        self.api.incoming_edges(idx, 0.0).await
     }
 
     /// Total degree (incoming + outgoing) for a node.

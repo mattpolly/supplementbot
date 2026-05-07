@@ -51,6 +51,7 @@ pub struct AppStateInner {
 impl AppState {
     pub async fn init(
         pg_url: &str,
+        api_url: &str,
         db_url: &str,
         db_user: &str,
         db_pass: &str,
@@ -62,8 +63,8 @@ impl AppState {
         session_timeout_secs: u64,
         ip_daily_cap: usize,
     ) -> Self {
-        // Connect to supplementology Postgres (supplement KB) + SurrealDB (intake graph)
-        let graph = KnowledgeGraph::open(pg_url, db_url, db_user, db_pass)
+        // Connect to supplementology Postgres (writes) + API (reads) + SurrealDB (intake graph)
+        let graph = KnowledgeGraph::open(pg_url, api_url, db_url, db_user, db_pass)
             .await
             .expect("failed to connect to knowledge graph databases");
 

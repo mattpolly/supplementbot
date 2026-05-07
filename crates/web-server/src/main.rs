@@ -31,6 +31,8 @@ async fn main() {
         .unwrap_or(3000);
     let pg_url = std::env::var("SUPPLEMENTOLOGY_DATABASE_URL")
         .unwrap_or_else(|_| "postgresql://supplementology:supplementology@localhost:5433/supplementology".to_string());
+    let api_url = std::env::var("SUPPLEMENTOLOGY_API_URL")
+        .unwrap_or_else(|_| "http://localhost:3001".to_string());
     let db_url = std::env::var("DB_URL").unwrap_or_else(|_| "ws://localhost:8000".to_string());
     let db_user = std::env::var("DB_USER").unwrap_or_else(|_| "root".to_string());
     let db_pass = std::env::var("DB_PASS").unwrap_or_else(|_| "root".to_string());
@@ -74,6 +76,7 @@ async fn main() {
     // -- Initialize shared state --
     let state = AppState::init(
         &pg_url,
+        &api_url,
         &db_url,
         &db_user,
         &db_pass,

@@ -1,5 +1,6 @@
 pub mod types;
 pub mod export;
+pub mod client;
 pub mod source;
 pub mod merge;
 pub mod graph;
