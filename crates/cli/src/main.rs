@@ -4,7 +4,7 @@ use graph_service::graph::KnowledgeGraph;
 use graph_service::lens::ComplexityLens;
 use graph_service::merge::MergeStore;
 use graph_service::query::{QueryConfig, QueryEngine};
-use graph_service::source::{EdgeQuality, SourceStore};
+use graph_service::source::EdgeQuality;
 use llm_client::anthropic::AnthropicProvider;
 use llm_client::gemini::GeminiProvider;
 use llm_client::mock::MockProvider;
@@ -325,7 +325,7 @@ async fn run_confirm_edges(ingredient: Option<String>, supplementology_url: Stri
 
     let graph = KnowledgeGraph::open(&pg_url(), &api_url(), &db_url, &db_user, &db_pass).await
         .expect("failed to connect to graph DB");
-    let source_store = SourceStore::new(graph.pool());
+    let source_store = graph.source_store();
 
     // Get ingredient names to process
     let all_ingredients = graph.known_ingredients().await;
@@ -495,7 +495,7 @@ async fn run_query(
         std::process::exit(1);
     }
 
-    let source = SourceStore::new(graph.pool());
+    let source = graph.source_store();
     let merge = MergeStore::new(graph.db());
     let engine = QueryEngine::new(&graph, &source, &merge).await;
 
@@ -739,7 +739,7 @@ async fn main() {
     }
 
     // Create source store (Postgres) and merge store (SurrealDB)
-    let source_store = SourceStore::new(graph.pool());
+    let source_store = graph.source_store();
     let merge_store = MergeStore::new(graph.db());
 
     // --resolve-cuis: populate merge store CUIs from SuppKG and exit (no LLM)

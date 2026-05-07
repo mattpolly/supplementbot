@@ -121,6 +121,11 @@ impl KnowledgeGraph {
         &self.api
     }
 
+    /// Build a SourceStore wired to this graph's pool (writes) and API client (reads).
+    pub fn source_store(&self) -> crate::source::SourceStore {
+        crate::source::SourceStore::new(&self.pool, &self.api)
+    }
+
     // -- Node operations --------------------------------------------------
 
     /// Add a node. If a node with this name already exists, returns the existing index.

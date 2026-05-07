@@ -68,7 +68,7 @@ impl AppState {
             .await
             .expect("failed to connect to knowledge graph databases");
 
-        let source = SourceStore::new(graph.pool());
+        let source = graph.source_store();
         let merge = MergeStore::new(graph.db());
 
         // Initialize intake KG services (same DB, intake_-prefixed tables)
