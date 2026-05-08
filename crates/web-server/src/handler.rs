@@ -343,7 +343,7 @@ pub async fn process_turn(
     // alias lists and string matching can't reliably cover, while respecting
     // clinical distinctions between similar-sounding profiles.
     if !extraction.symptoms.is_empty() {
-        let known_profiles = s.intake_store.all_symptom_profile_ids().await;
+        let known_profiles = s.intake_store.all_symptom_profile_ids();
         let resolved = symptom_resolver::resolve_symptoms(
             &extraction.symptoms,
             &known_profiles,
@@ -437,7 +437,6 @@ pub async fn process_turn(
     // Get relevant dimensions for context building
     let relevant_dims: Vec<_> = engine
         .relevant_dimensions(&traversal_ctx)
-        .await
         .into_iter()
         .collect();
 
@@ -463,7 +462,7 @@ pub async fn process_turn(
     // → immune archetype → "immune system" → Quercetin.
     let mut profile_systems: Vec<String> = Vec::new();
     for profile_id in &active_profiles_snap {
-        if let Some(sp) = s.intake_store.get_symptom_profile(profile_id).await {
+        if let Some(sp) = s.intake_store.get_symptom_profile(profile_id) {
             // Profile-specific associated systems first
             for sys in &sp.associated_systems {
                 if !profile_systems.contains(sys) {
@@ -471,7 +470,7 @@ pub async fn process_turn(
                 }
             }
             // Archetype default systems as fallback
-            if let Some(arch) = s.intake_store.get_archetype(&sp.archetype_id).await {
+            if let Some(arch) = s.intake_store.get_archetype(&sp.archetype_id) {
                 for sys in &arch.default_systems {
                     if !profile_systems.contains(sys) {
                         profile_systems.push(sys.clone());

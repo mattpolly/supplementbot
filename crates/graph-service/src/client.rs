@@ -399,6 +399,135 @@ impl SupplementClient {
         results
     }
 
+    // -- Intake config -------------------------------------------------------
+
+    pub async fn intake_archetypes(&self) -> Vec<crate::intake::types::ArchetypeProfile> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            name: String,
+            sufficient_dimensions: i16,
+            relevant_oldcarts: Vec<String>,
+            irrelevant_oldcarts: Vec<String>,
+            default_systems: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct Resp { archetypes: Vec<Row> }
+
+        let resp: Resp = match self.get_json(
+            self.client.get(self.url("/v1/intake/archetypes"))
+        ).await {
+            Some(r) => r,
+            None => return vec![],
+        };
+
+        use crate::intake::types::OldcartsDimension;
+        resp.archetypes.into_iter().map(|r| crate::intake::types::ArchetypeProfile {
+            id: r.id,
+            name: r.name,
+            sufficient_dimensions: r.sufficient_dimensions as u8,
+            relevant_oldcarts: r.relevant_oldcarts.iter()
+                .filter_map(|s| parse_oldcarts(s)).collect(),
+            irrelevant_oldcarts: r.irrelevant_oldcarts.iter()
+                .filter_map(|s| parse_oldcarts(s)).collect(),
+            default_systems: r.default_systems,
+        }).collect()
+    }
+
+    pub async fn intake_symptom_profiles(&self) -> Vec<crate::intake::types::SymptomProfile> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            name: String,
+            cui: Option<String>,
+            aliases: Vec<String>,
+            archetype_id: String,
+            sufficient_dimensions_override: Option<i16>,
+            relevant_oldcarts_override: Option<Vec<String>>,
+            irrelevant_oldcarts_override: Option<Vec<String>>,
+            associated_systems: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct Resp { profiles: Vec<Row> }
+
+        let resp: Resp = match self.get_json(
+            self.client.get(self.url("/v1/intake/symptom-profiles"))
+        ).await {
+            Some(r) => r,
+            None => return vec![],
+        };
+
+        resp.profiles.into_iter().map(|r| crate::intake::types::SymptomProfile {
+            id: r.id,
+            name: r.name,
+            cui: r.cui,
+            aliases: r.aliases,
+            archetype_id: r.archetype_id,
+            sufficient_dimensions_override: r.sufficient_dimensions_override.map(|v| v as u8),
+            relevant_oldcarts_override: r.relevant_oldcarts_override.map(|v|
+                v.iter().filter_map(|s| parse_oldcarts(s)).collect()
+            ),
+            irrelevant_oldcarts_override: r.irrelevant_oldcarts_override.map(|v|
+                v.iter().filter_map(|s| parse_oldcarts(s)).collect()
+            ),
+            associated_systems: r.associated_systems,
+        }).collect()
+    }
+
+    pub async fn intake_questions(&self) -> Vec<crate::intake::types::QuestionTemplate> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            template: String,
+            oldcarts_dimension: Option<String>,
+            system_name: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Resp { questions: Vec<Row> }
+
+        let resp: Resp = match self.get_json(
+            self.client.get(self.url("/v1/intake/questions"))
+        ).await {
+            Some(r) => r,
+            None => return vec![],
+        };
+
+        resp.questions.into_iter().map(|r| crate::intake::types::QuestionTemplate {
+            id: r.id,
+            template: r.template,
+            oldcarts_dimension: r.oldcarts_dimension.as_deref().and_then(parse_oldcarts),
+            system_name: r.system_name,
+        }).collect()
+    }
+
+    pub async fn intake_clusters(&self) -> Vec<crate::intake::types::SymptomCluster> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            name: String,
+            description: String,
+            member_symptoms: Vec<String>,
+            prioritized_systems: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct Resp { clusters: Vec<Row> }
+
+        let resp: Resp = match self.get_json(
+            self.client.get(self.url("/v1/intake/clusters"))
+        ).await {
+            Some(r) => r,
+            None => return vec![],
+        };
+
+        resp.clusters.into_iter().map(|r| crate::intake::types::SymptomCluster {
+            id: r.id,
+            name: r.name,
+            description: r.description,
+            member_symptoms: r.member_symptoms,
+            prioritized_systems: r.prioritized_systems,
+        }).collect()
+    }
+
     // -- Citations -----------------------------------------------------------
 
     pub async fn citations_for_ingredient(&self, ingredient: &str) -> Vec<CitationRecord> {
@@ -535,5 +664,21 @@ fn api_source_to_source(s: &str) -> Source {
         "nsai_emergent" => Source::StructurallyEmergent,
         "nsai_deduced" => Source::Deduced,
         _ => Source::Extracted,
+    }
+}
+
+fn parse_oldcarts(s: &str) -> Option<crate::intake::types::OldcartsDimension> {
+    use crate::intake::types::OldcartsDimension::*;
+    match s {
+        "onset"       => Some(Onset),
+        "location"    => Some(Location),
+        "duration"    => Some(Duration),
+        "character"   => Some(Character),
+        "aggravating" => Some(Aggravating),
+        "alleviating" => Some(Alleviating),
+        "radiation"   => Some(Radiation),
+        "timing"      => Some(Timing),
+        "severity"    => Some(Severity),
+        _             => None,
     }
 }

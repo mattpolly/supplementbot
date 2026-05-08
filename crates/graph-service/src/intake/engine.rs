@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::store::IntakeGraphStore;
+use super::pg_store::PgIntakeStore;
 use super::types::*;
 
 // ---------------------------------------------------------------------------
@@ -71,11 +71,11 @@ pub struct TraversalContext {
 // ---------------------------------------------------------------------------
 
 pub struct IntakeEngine<'a> {
-    store: &'a IntakeGraphStore,
+    store: &'a PgIntakeStore,
 }
 
 impl<'a> IntakeEngine<'a> {
-    pub fn new(store: &'a IntakeGraphStore) -> Self {
+    pub fn new(store: &'a PgIntakeStore) -> Self {
         Self { store }
     }
 
@@ -181,11 +181,11 @@ impl<'a> IntakeEngine<'a> {
                 }
 
                 // Check if enough OLDCARTS filled
-                let sufficient = self.sufficient_dimensions(ctx).await;
+                let sufficient = self.sufficient_dimensions(ctx);
                 if ctx.filled_count >= sufficient as usize {
                     if ctx.candidate_count > 0 {
                         // Check if we should go to system review or differentiation
-                        let unreviewed = self.unreviewed_system_count(ctx).await;
+                        let unreviewed = self.unreviewed_system_count(ctx);
                         if unreviewed > 0 {
                             trace.push(format!(
                                 "OLDCARTS sufficient ({}/{}) → SystemReview ({} systems)",
@@ -232,7 +232,7 @@ impl<'a> IntakeEngine<'a> {
             IntakeStageId::SystemReview => {
                 // Skip system review entirely if one candidate is already dominant
                 let dominant = ctx.candidate_count > 0 && ctx.confidence_gap > 0.4;
-                let unreviewed = self.unreviewed_system_count(ctx).await;
+                let unreviewed = self.unreviewed_system_count(ctx);
                 if unreviewed == 0 || ctx.user_disengaged || dominant {
                     if ctx.differentiator_count > 0 && !dominant {
                         trace.push("Systems reviewed → Differentiation".into());
@@ -303,13 +303,13 @@ impl<'a> IntakeEngine<'a> {
     ) -> Option<ResolvedQuestion> {
         match ctx.stage {
             IntakeStageId::ChiefComplaint => {
-                return self.select_chief_complaint_question(ctx, trace).await;
+                return self.select_chief_complaint_question(ctx, trace);
             }
             IntakeStageId::Hpi => {
-                return self.select_hpi_question(ctx, trace).await;
+                return self.select_hpi_question(ctx, trace);
             }
             IntakeStageId::SystemReview => {
-                return self.select_system_review_question(ctx, trace).await;
+                return self.select_system_review_question(ctx, trace);
             }
             IntakeStageId::Differentiation => {
                 // Differentiating questions come from the supplement KG dynamically,
@@ -344,7 +344,7 @@ impl<'a> IntakeEngine<'a> {
         }
     }
 
-    async fn select_chief_complaint_question(
+    fn select_chief_complaint_question(
         &self,
         ctx: &TraversalContext,
         trace: &mut Vec<String>,
@@ -360,17 +360,17 @@ impl<'a> IntakeEngine<'a> {
             return None;
         }
 
-        let q = self.store.get_question(q_id).await?;
+        let q = self.store.get_question(q_id)?;
         trace.push(format!("Selected: {} (chief complaint)", q_id));
         Some(ResolvedQuestion {
             template_id: q_id.into(),
-            text: q.template,
+            text: q.template.clone(),
             goal_id: "identify_chief_complaint".into(),
             score: 1.0,
         })
     }
 
-    async fn select_hpi_question(
+    fn select_hpi_question(
         &self,
         ctx: &TraversalContext,
         trace: &mut Vec<String>,
@@ -383,11 +383,11 @@ impl<'a> IntakeEngine<'a> {
         if !ctx.checklist_complete {
             if let Some(template_id) = ctx.checklist_next_question {
                 if !ctx.visited_questions.contains(template_id) {
-                    if let Some(q) = self.store.get_question(template_id).await {
+                    if let Some(q) = self.store.get_question(template_id) {
                         trace.push(format!("Safety checklist: forcing {}", template_id));
                         return Some(ResolvedQuestion {
                             template_id: template_id.to_string(),
-                            text: q.template,
+                            text: q.template.clone(),
                             goal_id: "safety_checklist".into(),
                             score: 10.0, // Always highest priority
                         });
@@ -397,8 +397,8 @@ impl<'a> IntakeEngine<'a> {
         }
 
         // Collect relevant OLDCARTS dimensions for active profiles
-        let relevant = self.relevant_dimensions(ctx).await;
-        let irrelevant = self.irrelevant_dimensions(ctx).await;
+        let relevant = self.relevant_dimensions(ctx);
+        let irrelevant = self.irrelevant_dimensions(ctx);
 
         trace.push(format!(
             "Relevant OLDCARTS: {:?}, Irrelevant: {:?}",
@@ -518,7 +518,7 @@ impl<'a> IntakeEngine<'a> {
         candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
         if let Some((q_id, goal_id, score)) = candidates.first() {
-            let q = self.store.get_question(q_id).await?;
+            let q = self.store.get_question(q_id)?;
             let text = self.fill_template(&q.template, ctx);
             trace.push(format!(
                 "Selected: {} (score: {:.2}, goal: {})",
@@ -536,7 +536,7 @@ impl<'a> IntakeEngine<'a> {
         }
     }
 
-    async fn select_system_review_question(
+    fn select_system_review_question(
         &self,
         ctx: &TraversalContext,
         trace: &mut Vec<String>,
@@ -546,8 +546,7 @@ impl<'a> IntakeEngine<'a> {
 
         // Check clusters for prioritized systems
         for profile_id in &ctx.active_profiles {
-            let clusters = self.store.clusters_for_symptom(profile_id).await;
-            for cluster in clusters {
+            for cluster in self.store.clusters_for_symptom(profile_id) {
                 for sys in &cluster.prioritized_systems {
                     if !ctx.reviewed_systems.contains(sys) {
                         prioritized.push((sys.clone(), 1.0));
@@ -558,11 +557,10 @@ impl<'a> IntakeEngine<'a> {
 
         // Add archetype default systems
         for profile_id in &ctx.active_profiles {
-            if let Some(sp) = self.store.get_symptom_profile(profile_id).await {
-                if let Some(arch) = self.store.get_archetype(&sp.archetype_id).await {
+            if let Some(sp) = self.store.get_symptom_profile(profile_id) {
+                if let Some(arch) = self.store.get_archetype(&sp.archetype_id) {
                     for sys in &arch.default_systems {
                         if !ctx.reviewed_systems.contains(sys) {
-                            // Lower priority than cluster-suggested
                             if !prioritized.iter().any(|(s, _)| s == sys) {
                                 prioritized.push((sys.clone(), 0.6));
                             }
@@ -583,44 +581,22 @@ impl<'a> IntakeEngine<'a> {
         // Sort by priority
         prioritized.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Find first system with an unvisited question
+        // Find first system with an unvisited question.
+        // `questions_for_system` replaces find_system_review + edges_from(Probes).
         for (system_name, priority) in &prioritized {
-            if let Some(sr) = self.store.find_system_review(system_name).await {
-                // Find the probes edge → question
-                let edges = self.store.edges_from(&sr.id).await;
-                for (target_id, edge_type, _meta) in edges {
-                    if edge_type == IntakeEdgeType::Probes
-                        && !ctx.visited_questions.contains(&target_id)
-                    {
-                        if let Some(q) = self.store.get_question(&target_id).await {
-                            trace.push(format!(
-                                "SystemReview: {} → {} (priority: {:.1})",
-                                system_name, target_id, priority
-                            ));
-                            return Some(ResolvedQuestion {
-                                template_id: target_id,
-                                text: q.template,
-                                goal_id: "identify_system_involvement".into(),
-                                score: *priority,
-                            });
-                        }
-                    }
-                }
-                // If all probes visited, use first screening question
-                if let Some(sq) = sr.screening_questions.first() {
-                    let synth_id = format!("sr_screening_{}", slug(system_name));
-                    if !ctx.visited_questions.contains(&synth_id) {
-                        trace.push(format!(
-                            "SystemReview: {} screening (priority: {:.1})",
-                            system_name, priority
-                        ));
-                        return Some(ResolvedQuestion {
-                            template_id: synth_id,
-                            text: sq.clone(),
-                            goal_id: "identify_system_involvement".into(),
-                            score: *priority,
-                        });
-                    }
+            let qs = self.store.questions_for_system(system_name);
+            for q in qs {
+                if !ctx.visited_questions.contains(&q.id) {
+                    trace.push(format!(
+                        "SystemReview: {} → {} (priority: {:.1})",
+                        system_name, q.id, priority
+                    ));
+                    return Some(ResolvedQuestion {
+                        template_id: q.id.clone(),
+                        text: q.template.clone(),
+                        goal_id: "identify_system_involvement".into(),
+                        score: *priority,
+                    });
                 }
             }
         }
@@ -634,13 +610,13 @@ impl<'a> IntakeEngine<'a> {
     // -----------------------------------------------------------------------
 
     /// Get the sufficient dimensions count for the active profiles.
-    async fn sufficient_dimensions(&self, ctx: &TraversalContext) -> u8 {
+    fn sufficient_dimensions(&self, ctx: &TraversalContext) -> u8 {
         let mut max_sufficient: u8 = 4; // default
         for profile_id in &ctx.active_profiles {
-            if let Some(sp) = self.store.get_symptom_profile(profile_id).await {
+            if let Some(sp) = self.store.get_symptom_profile(profile_id) {
                 if let Some(override_val) = sp.sufficient_dimensions_override {
                     max_sufficient = max_sufficient.max(override_val);
-                } else if let Some(arch) = self.store.get_archetype(&sp.archetype_id).await {
+                } else if let Some(arch) = self.store.get_archetype(&sp.archetype_id) {
                     max_sufficient = max_sufficient.max(arch.sufficient_dimensions);
                 }
             }
@@ -649,13 +625,13 @@ impl<'a> IntakeEngine<'a> {
     }
 
     /// Get relevant OLDCARTS dimensions across all active profiles.
-    pub async fn relevant_dimensions(&self, ctx: &TraversalContext) -> HashSet<OldcartsDimension> {
+    pub fn relevant_dimensions(&self, ctx: &TraversalContext) -> HashSet<OldcartsDimension> {
         let mut relevant = HashSet::new();
         for profile_id in &ctx.active_profiles {
-            if let Some(sp) = self.store.get_symptom_profile(profile_id).await {
+            if let Some(sp) = self.store.get_symptom_profile(profile_id) {
                 if let Some(ref overrides) = sp.relevant_oldcarts_override {
                     relevant.extend(overrides.iter());
-                } else if let Some(arch) = self.store.get_archetype(&sp.archetype_id).await {
+                } else if let Some(arch) = self.store.get_archetype(&sp.archetype_id) {
                     relevant.extend(arch.relevant_oldcarts.iter());
                 }
             }
@@ -668,13 +644,13 @@ impl<'a> IntakeEngine<'a> {
     }
 
     /// Get irrelevant OLDCARTS dimensions across all active profiles.
-    async fn irrelevant_dimensions(&self, ctx: &TraversalContext) -> HashSet<OldcartsDimension> {
+    fn irrelevant_dimensions(&self, ctx: &TraversalContext) -> HashSet<OldcartsDimension> {
         let mut irrelevant = HashSet::new();
         for profile_id in &ctx.active_profiles {
-            if let Some(sp) = self.store.get_symptom_profile(profile_id).await {
+            if let Some(sp) = self.store.get_symptom_profile(profile_id) {
                 if let Some(ref overrides) = sp.irrelevant_oldcarts_override {
                     irrelevant.extend(overrides.iter());
-                } else if let Some(arch) = self.store.get_archetype(&sp.archetype_id).await {
+                } else if let Some(arch) = self.store.get_archetype(&sp.archetype_id) {
                     irrelevant.extend(arch.irrelevant_oldcarts.iter());
                 }
             }
@@ -683,14 +659,14 @@ impl<'a> IntakeEngine<'a> {
     }
 
     /// Count unreviewed systems for active profiles.
-    async fn unreviewed_system_count(&self, ctx: &TraversalContext) -> usize {
+    fn unreviewed_system_count(&self, ctx: &TraversalContext) -> usize {
         let mut systems = HashSet::new();
         for profile_id in &ctx.active_profiles {
-            if let Some(sp) = self.store.get_symptom_profile(profile_id).await {
+            if let Some(sp) = self.store.get_symptom_profile(profile_id) {
                 for sys in &sp.associated_systems {
                     systems.insert(sys.clone());
                 }
-                if let Some(arch) = self.store.get_archetype(&sp.archetype_id).await {
+                if let Some(arch) = self.store.get_archetype(&sp.archetype_id) {
                     for sys in &arch.default_systems {
                         systems.insert(sys.clone());
                     }
@@ -756,14 +732,11 @@ fn slug(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::KnowledgeGraph;
-    use crate::intake::seed::seed_intake_graph;
+    use crate::intake::pg_store::PgIntakeStore;
+    use crate::intake::seed::build_seed_store;
 
-    async fn setup() -> (KnowledgeGraph, IntakeGraphStore) {
-        let kg = KnowledgeGraph::in_memory().await.unwrap();
-        let store = IntakeGraphStore::new(kg.db());
-        seed_intake_graph(&store).await;
-        (kg, store)
+    fn setup() -> PgIntakeStore {
+        build_seed_store()
     }
 
     fn empty_context() -> TraversalContext {
@@ -794,7 +767,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chief_complaint_asks_what_brings_you_in() {
-        let (_kg, store) = setup().await;
+        let store = setup();
         let engine = IntakeEngine::new(&store);
         let ctx = empty_context();
 
@@ -806,7 +779,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chief_complaint_transitions_to_hpi() {
-        let (_kg, store) = setup().await;
+        let store = setup();
         let engine = IntakeEngine::new(&store);
         let mut ctx = empty_context();
         ctx.active_profiles.push("muscle_cramps".into());
@@ -817,22 +790,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_hpi_skips_irrelevant_dimensions() {
-        let (_kg, store) = setup().await;
+        let store = setup();
         let engine = IntakeEngine::new(&store);
 
-        // Add a sleep archetype symptom profile
-        store.add_symptom_profile(&SymptomProfile {
-            id: "insomnia".into(),
-            name: "Insomnia".into(),
-            cui: None,
-            aliases: vec![],
-            archetype_id: "sleep".into(),
-            relevant_oldcarts_override: None,
-            irrelevant_oldcarts_override: None,
-            sufficient_dimensions_override: None,
-            associated_systems: vec!["nervous system".into()],
-        }).await;
-
+        // insomnia is in the seed store — sleep archetype marks Location + Radiation irrelevant
         let mut ctx = empty_context();
         ctx.stage = IntakeStageId::Hpi;
         ctx.active_profiles.push("insomnia".into());
@@ -842,51 +803,31 @@ mod tests {
         let q = action.question.unwrap();
 
         // Sleep archetype marks Location and Radiation as irrelevant.
-        // So we should NOT get ask_location or ask_radiation first.
         assert_ne!(q.template_id, "ask_location");
         assert_ne!(q.template_id, "ask_radiation");
     }
 
     #[tokio::test]
     async fn test_medication_check_is_safety_gated() {
-        let (_kg, store) = setup().await;
+        let store = setup();
         let engine = IntakeEngine::new(&store);
-
-        store.add_symptom_profile(&SymptomProfile {
-            id: "muscle_cramps".into(),
-            name: "Muscle Cramps".into(),
-            cui: None,
-            aliases: vec![],
-            archetype_id: "pain".into(),
-            relevant_oldcarts_override: None,
-            irrelevant_oldcarts_override: None,
-            sufficient_dimensions_override: None,
-            associated_systems: vec!["nervous system".into()],
-        }).await;
 
         let mut ctx = empty_context();
         ctx.stage = IntakeStageId::Hpi;
         ctx.active_profiles.push("muscle_cramps".into());
         ctx.candidate_count = 3;
-        ctx.filled_count = 5; // Enough to trigger transition
+        ctx.filled_count = 5;
         ctx.checklist_complete = false;
         ctx.checklist_next_question = Some("ask_prescriptions");
         ctx.differentiator_count = 2;
         ctx.chief_complaint = Some("muscle cramps".into());
 
-        // Even though OLDCARTS is sufficient and there are candidates,
-        // the engine should NOT transition to recommendation because
-        // the checklist is incomplete. It should ask a safety question.
         let action = engine.next_turn(&ctx).await;
 
-        // Either it stays in HPI and asks a checklist question, or transitions
-        // but must NOT go to Recommendation
         if action.next_stage.is_none() {
-            // Good — stayed to ask safety question
             let q = action.question.unwrap();
             assert_eq!(q.template_id, "ask_prescriptions");
         }
-        // If it transitions, it should NOT go to Recommendation
         if let Some(next) = &action.next_stage {
             assert_ne!(*next, IntakeStageId::Recommendation);
         }
@@ -894,36 +835,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_visited_questions_prevents_repeats() {
-        let (_kg, store) = setup().await;
+        let store = setup();
         let engine = IntakeEngine::new(&store);
-
-        store.add_symptom_profile(&SymptomProfile {
-            id: "headache".into(),
-            name: "Headache".into(),
-            cui: None,
-            aliases: vec![],
-            archetype_id: "pain".into(),
-            relevant_oldcarts_override: None,
-            irrelevant_oldcarts_override: None,
-            sufficient_dimensions_override: None,
-            associated_systems: vec!["nervous system".into()],
-        }).await;
 
         let mut ctx = empty_context();
         ctx.stage = IntakeStageId::Hpi;
         ctx.active_profiles.push("headache".into());
         ctx.chief_complaint = Some("headache".into());
 
-        // First turn
         let action1 = engine.next_turn(&ctx).await;
         let q1_id = action1.question.as_ref().unwrap().template_id.clone();
 
-        // Mark as visited
         ctx.visited_questions.insert(q1_id.clone());
         ctx.filled_oldcarts.insert(OldcartsDimension::Onset);
         ctx.filled_count = 1;
 
-        // Second turn — should NOT repeat the same question
         let action2 = engine.next_turn(&ctx).await;
         if let Some(q2) = &action2.question {
             assert_ne!(q2.template_id, q1_id);
@@ -932,33 +858,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_system_review_uses_cluster_priority() {
-        let (_kg, store) = setup().await;
+        let store = setup();
         let engine = IntakeEngine::new(&store);
-
-        // Add profiles that form the electrolyte cluster
-        store.add_symptom_profile(&SymptomProfile {
-            id: "muscle_cramps".into(),
-            name: "Muscle Cramps".into(),
-            cui: None,
-            aliases: vec![],
-            archetype_id: "pain".into(),
-            relevant_oldcarts_override: None,
-            irrelevant_oldcarts_override: None,
-            sufficient_dimensions_override: None,
-            associated_systems: vec!["musculoskeletal system".into()],
-        }).await;
-
-        store.add_symptom_profile(&SymptomProfile {
-            id: "insomnia".into(),
-            name: "Insomnia".into(),
-            cui: None,
-            aliases: vec![],
-            archetype_id: "sleep".into(),
-            relevant_oldcarts_override: None,
-            irrelevant_oldcarts_override: None,
-            sufficient_dimensions_override: None,
-            associated_systems: vec!["nervous system".into()],
-        }).await;
 
         let mut ctx = empty_context();
         ctx.stage = IntakeStageId::SystemReview;
@@ -966,8 +867,6 @@ mod tests {
 
         let action = engine.next_turn(&ctx).await;
         if let Some(q) = &action.question {
-            // Electrolyte cluster prioritizes nervous system
-            // so we should get review_nervous first
             assert!(
                 q.template_id == "review_nervous" || q.template_id == "review_musculoskeletal",
                 "Expected nervous or musculoskeletal review, got: {}",

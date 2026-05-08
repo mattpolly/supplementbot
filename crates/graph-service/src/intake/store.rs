@@ -241,6 +241,7 @@ impl IntakeGraphStore {
             oldcarts_dimension: r
                 .oldcarts_dimension
                 .and_then(|s| parse_oldcarts_dimension(&s)),
+            system_name: None,
         })
     }
 
@@ -257,6 +258,7 @@ impl IntakeGraphStore {
                 oldcarts_dimension: r
                     .oldcarts_dimension
                     .and_then(|s| parse_oldcarts_dimension(&s)),
+                system_name: None,
             })
             .collect()
     }

@@ -2,8 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use graph_service::graph::KnowledgeGraph;
-use graph_service::intake::seed::seed_intake_graph;
-use graph_service::intake::store::IntakeGraphStore;
+use graph_service::intake::pg_store::PgIntakeStore;
 use graph_service::merge::MergeStore;
 use graph_service::query::{ArchetypeCoverage, QueryEngine};
 use graph_service::source::SourceStore;
@@ -36,8 +35,8 @@ pub struct AppStateInner {
     pub extractor: Arc<dyn LlmProvider>,
     pub sessions: SessionManager,
     pub safety_filter: SafetyFilter,
-    /// Intake knowledge graph store (process graph for clinical interview).
-    pub intake_store: IntakeGraphStore,
+    /// Intake config store — archetypes, profiles, questions, clusters (from Postgres via API).
+    pub intake_store: PgIntakeStore,
     /// Coverage strength per symptom archetype, sorted Strong → Moderate → Weak.
     /// Cached at startup for use in the opening greeting.
     pub archetype_coverage: Vec<ArchetypeCoverage>,
@@ -67,12 +66,8 @@ impl AppState {
         let source = graph.source_store();
         let merge = MergeStore::new(graph.db());
 
-        // Initialize intake KG services (same DB, intake_-prefixed tables)
-        let intake_store = IntakeGraphStore::new(graph.db());
-
-        // Seed intake graph structure (idempotent)
-        seed_intake_graph(&intake_store).await;
-        eprintln!("  intake KG seeded");
+        // Load intake config from supplementology API (Postgres-backed)
+        let intake_store = PgIntakeStore::load(graph.api()).await;
 
         // SuppKG is accessed directly by the nsai-loop, not stored in AppState.
         // Log availability at startup for diagnostics only.
@@ -107,7 +102,7 @@ impl AppState {
 
         // Compute per-archetype coverage at startup (query-only, no DB writes)
         let query_engine = QueryEngine::new(&graph, &source, &merge).await;
-        let archetypes = intake_store.all_archetypes().await;
+        let archetypes = intake_store.all_archetypes();
         let archetype_coverage = query_engine.coverage_by_archetype(&archetypes).await;
         let strong_count = archetype_coverage.iter().filter(|c| c.strength == graph_service::query::CoverageStrength::Strong).count();
         let moderate_count = archetype_coverage.iter().filter(|c| c.strength == graph_service::query::CoverageStrength::Moderate).count();

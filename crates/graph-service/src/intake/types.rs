@@ -47,13 +47,16 @@ pub struct IntakeStage {
 }
 
 /// A parameterized question the agent can ask.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QuestionTemplate {
     pub id: String,
     /// Template text with {placeholders}.
     pub template: String,
     /// Which OLDCARTS dimension this question targets, if any.
     pub oldcarts_dimension: Option<OldcartsDimension>,
+    /// Which body system this question reviews (system review questions only).
+    #[serde(default)]
+    pub system_name: Option<String>,
 }
 
 /// What information we're trying to gather.
