@@ -441,8 +441,8 @@ pub async fn process_turn(
         .into_iter()
         .collect();
 
-    // Step 7: Executor — run graph actions against supplement KG + iDISK
-    let executor = GraphActionExecutor::new(&s.graph, &s.source, &s.merge, &s.idisk);
+    // Step 7: Executor — run graph actions against supplement KG
+    let executor = GraphActionExecutor::new(&s.graph, &s.source, &s.merge, s.graph.api());
 
     let (all_symptoms, active_profiles_snap) = s
         .sessions

@@ -58,15 +58,11 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3); // max 3 sessions per IP per day
-    let idisk_data_dir = std::env::var("IDISK_DATA_DIR").ok();
     let suppkg_path = std::env::var("SUPPKG_PATH").ok();
 
     eprintln!("supplementbot-web starting...");
     eprintln!("  db: {db_url}");
     eprintln!("  static: {static_dir}");
-    if let Some(ref dir) = idisk_data_dir {
-        eprintln!("  iDISK: {dir}");
-    }
     if let Some(ref p) = suppkg_path {
         eprintln!("  SuppKG: {p}");
     }
@@ -80,7 +76,6 @@ async fn main() {
         &db_url,
         &db_user,
         &db_pass,
-        idisk_data_dir.as_deref(),
         suppkg_path.as_deref(),
         max_concurrent,
         daily_cap,

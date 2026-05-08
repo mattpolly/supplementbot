@@ -6,12 +6,12 @@
 // the executor runs X against the supplement KG and returns structured results.
 // ---------------------------------------------------------------------------
 
+use crate::client::SupplementClient;
 use crate::graph::KnowledgeGraph;
 use crate::merge::MergeStore;
 use crate::query::{QueryConfig, QueryEngine};
 use crate::source::SourceStore;
 
-use super::idisk::IdiskImporter;
 use super::types::GraphActionType;
 
 /// Results from executing graph actions for a single turn.
@@ -73,7 +73,7 @@ pub struct GraphActionExecutor<'a> {
     graph: &'a KnowledgeGraph,
     source: &'a SourceStore,
     merge: &'a MergeStore,
-    idisk: &'a IdiskImporter,
+    api: &'a SupplementClient,
 }
 
 impl<'a> GraphActionExecutor<'a> {
@@ -81,13 +81,13 @@ impl<'a> GraphActionExecutor<'a> {
         graph: &'a KnowledgeGraph,
         source: &'a SourceStore,
         merge: &'a MergeStore,
-        idisk: &'a IdiskImporter,
+        api: &'a SupplementClient,
     ) -> Self {
         Self {
             graph,
             source,
             merge,
-            idisk,
+            api,
         }
     }
 
@@ -291,7 +291,7 @@ impl<'a> GraphActionExecutor<'a> {
     ) {
         for med in medications {
             let interactions = self
-                .idisk
+                .api
                 .interactions_with_drug(candidate_names, med)
                 .await;
             for (ingredient, interaction) in interactions {
@@ -312,7 +312,7 @@ impl<'a> GraphActionExecutor<'a> {
         results: &mut ActionResults,
     ) {
         for supp in supplements {
-            let reactions = self.idisk.adverse_reactions_for(supp).await;
+            let reactions = self.api.adverse_reactions_for(supp).await;
             for (symptom_id, source) in reactions {
                 // Check if any of the user's symptoms match this adverse reaction
                 let symptom_lower = symptom_id.replace('_', " ");
@@ -338,7 +338,7 @@ impl<'a> GraphActionExecutor<'a> {
         results: &mut ActionResults,
     ) {
         for name in candidate_names.iter().take(5) {
-            if let Some(text) = self.idisk.mechanism_of_action(name).await {
+            if let Some(text) = self.api.mechanism_of_action(name).await {
                 // Truncate to reasonable length for prompt inclusion
                 let truncated = if text.len() > 500 {
                     format!("{}...", &text[..497])

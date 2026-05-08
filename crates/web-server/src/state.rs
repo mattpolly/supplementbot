@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use graph_service::graph::KnowledgeGraph;
-use graph_service::intake::idisk::IdiskImporter;
 use graph_service::intake::seed::seed_intake_graph;
 use graph_service::intake::store::IntakeGraphStore;
 use graph_service::merge::MergeStore;
@@ -39,8 +38,6 @@ pub struct AppStateInner {
     pub safety_filter: SafetyFilter,
     /// Intake knowledge graph store (process graph for clinical interview).
     pub intake_store: IntakeGraphStore,
-    /// iDISK importer (drug interactions, adverse reactions, mechanisms).
-    pub idisk: IdiskImporter,
     /// Coverage strength per symptom archetype, sorted Strong → Moderate → Weak.
     /// Cached at startup for use in the opening greeting.
     pub archetype_coverage: Vec<ArchetypeCoverage>,
@@ -55,7 +52,6 @@ impl AppState {
         db_url: &str,
         db_user: &str,
         db_pass: &str,
-        idisk_data_dir: Option<&str>,
         suppkg_path: Option<&str>,
         max_concurrent: usize,
         daily_cap: usize,
@@ -73,32 +69,10 @@ impl AppState {
 
         // Initialize intake KG services (same DB, intake_-prefixed tables)
         let intake_store = IntakeGraphStore::new(graph.db());
-        let idisk = IdiskImporter::new(graph.db());
 
         // Seed intake graph structure (idempotent)
         seed_intake_graph(&intake_store).await;
         eprintln!("  intake KG seeded");
-
-        // Import iDISK data if directory is provided and exists
-        if let Some(dir) = idisk_data_dir {
-            let path = Path::new(dir);
-            if path.is_dir() {
-                match idisk.import_all(path, &intake_store).await {
-                    Ok(stats) => {
-                        eprintln!(
-                            "  iDISK loaded: {} symptoms, {} drugs, {} ingredients, {} adverse, {} interactions",
-                            stats.symptom_profiles, stats.drugs, stats.ingredients,
-                            stats.adverse_reactions, stats.interactions
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("  iDISK import failed: {e}");
-                    }
-                }
-            } else {
-                eprintln!("  iDISK dir not found: {dir} — skipping");
-            }
-        }
 
         // SuppKG is accessed directly by the nsai-loop, not stored in AppState.
         // Log availability at startup for diagnostics only.
@@ -170,7 +144,6 @@ impl AppState {
                 sessions,
                 safety_filter,
                 intake_store,
-                idisk,
                 archetype_coverage,
                 debug_llm_prompt,
             }),

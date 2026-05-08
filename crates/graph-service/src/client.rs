@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::intake::idisk::DrugInteraction;
 use crate::source::{
     CitationRecord, EdgeAgreement, EdgeQuality, EdgeWithQuality, MultiProviderEdge,
     ProviderObservation,
@@ -125,12 +126,41 @@ struct QualityResponse {
 
 #[derive(Deserialize)]
 struct IngredientRow {
-    entity_name: String,
+    name: String,
 }
 
 #[derive(Deserialize)]
 struct IngredientsResponse {
     ingredients: Vec<IngredientRow>,
+}
+
+#[derive(Deserialize)]
+struct NarrativesResponse {
+    mechanism_of_action: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AdverseReactionRow {
+    symptom_slug: String,
+    source: String,
+}
+
+#[derive(Deserialize)]
+struct AdverseReactionsResponse {
+    adverse_reactions: Vec<AdverseReactionRow>,
+}
+
+#[derive(Deserialize)]
+struct DrugInteractionRow {
+    drug: String,
+    source: String,
+    description: Option<String>,
+    rating: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DrugInteractionsResponse {
+    interactions: Vec<DrugInteractionRow>,
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +231,7 @@ impl SupplementClient {
             Some(r) => r,
             None => return vec![],
         };
-        resp.ingredients.into_iter().map(|r| r.entity_name).collect()
+        resp.ingredients.into_iter().map(|r| r.name).collect()
     }
 
     // -- Edge traversal ------------------------------------------------------
@@ -318,6 +348,55 @@ impl SupplementClient {
                 confidence: o.confidence as f64,
             }).collect(),
         }
+    }
+
+    // -- iDISK safety data ---------------------------------------------------
+
+    pub async fn mechanism_of_action(&self, ingredient: &str) -> Option<String> {
+        let resp: NarrativesResponse = self.get_json(
+            self.client.get(self.url("/rpc/ingredient_narratives"))
+                .query(&[("name", ingredient)])
+        ).await?;
+        resp.mechanism_of_action
+    }
+
+    pub async fn adverse_reactions_for(&self, ingredient: &str) -> Vec<(String, String)> {
+        let slug = ingredient.to_lowercase().replace(' ', "_").replace('-', "_");
+        let resp: AdverseReactionsResponse = match self.get_json(
+            self.client.get(self.url(&format!("/v1/ingredients/{slug}/adverse-reactions")))
+        ).await {
+            Some(r) => r,
+            None => return vec![],
+        };
+        resp.adverse_reactions.into_iter()
+            .map(|r| (r.symptom_slug, r.source))
+            .collect()
+    }
+
+    pub async fn interactions_with_drug(
+        &self,
+        candidate_ingredients: &[String],
+        drug_name: &str,
+    ) -> Vec<(String, DrugInteraction)> {
+        let mut results = vec![];
+        for ingredient in candidate_ingredients {
+            let resp: DrugInteractionsResponse = match self.get_json(
+                self.client.get(self.url("/rpc/drug_interactions"))
+                    .query(&[("ingredient", ingredient.as_str()), ("drug", drug_name)])
+            ).await {
+                Some(r) => r,
+                None => continue,
+            };
+            for row in resp.interactions {
+                results.push((ingredient.clone(), DrugInteraction {
+                    drug_id: row.drug,
+                    source: row.source,
+                    rating: row.rating,
+                    description: row.description,
+                }));
+            }
+        }
+        results
     }
 
     // -- Citations -----------------------------------------------------------
