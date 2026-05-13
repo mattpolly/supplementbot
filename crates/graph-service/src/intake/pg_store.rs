@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// PgIntakeStore — HTTP-backed replacement for IntakeGraphStore (SurrealDB).
+// PgIntakeStore — HTTP-backed intake knowledge store.
 //
 // Loads all intake config from supplementology's Postgres-backed API at
 // startup and caches it in memory. The data is static (seeded by Alembic)
@@ -124,9 +124,21 @@ impl PgIntakeStore {
 
     // -- Clusters -------------------------------------------------------------
 
+    pub fn all_clusters(&self) -> &[SymptomCluster] {
+        &self.clusters
+    }
+
     pub fn clusters_for_symptom(&self, symptom_id: &str) -> Vec<&SymptomCluster> {
         self.clusters.iter()
             .filter(|c| c.member_symptoms.iter().any(|m| m == symptom_id))
             .collect()
+    }
+
+    pub fn question_count(&self) -> usize {
+        self.questions.len()
+    }
+
+    pub fn cluster_count(&self) -> usize {
+        self.clusters.len()
     }
 }

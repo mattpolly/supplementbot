@@ -14,6 +14,7 @@ use intake_agent::session::IntakePhase;
 use llm_client::provider::CompletionRequest;
 
 use crate::extract::{apply_extraction, extract_from_message, to_user_signal, EngagementLevel};
+use crate::planner;
 use crate::state::AppState;
 use crate::symptom_resolver;
 
@@ -135,18 +136,36 @@ pub async fn process_turn(
         });
     }
 
-    // Step 2: Extract structured data (cheap model)
-    let extraction = extract_from_message(user_message, s.extractor.as_ref()).await;
+    // Step 2: Extract structured data (cheap model).
+    // We pass the last bot question so short answers like "years" or "a couple
+    // hours" can be interpreted correctly in context.
+    let last_bot_question = s
+        .sessions
+        .with_session(session_id, |session| {
+            session.turns.iter().rev()
+                .find(|t| t.role == intake_agent::session::TurnRole::Agent)
+                .map(|t| t.text.clone())
+        })
+        .await
+        .flatten();
+
+    let extraction = extract_from_message(
+        user_message,
+        last_bot_question.as_deref(),
+        s.extractor.as_ref(),
+    ).await;
     let user_signal = to_user_signal(&extraction);
 
-    eprintln!(
-        "[session {session_id}] extraction: symptoms={:?} systems={:?} oldcarts_onset={:?} oldcarts_char={:?} denied={:?} engagement={:?}",
+    debug_log!(
+        "[session {session_id}] extraction: symptoms={:?} systems={:?} oldcarts_onset={:?} oldcarts_char={:?} oldcarts_duration={:?} denied={:?} engagement={:?} is_off_topic={}",
         extraction.symptoms,
         extraction.systems,
         extraction.oldcarts.onset,
         extraction.oldcarts.character,
+        extraction.oldcarts.duration,
         extraction.denied_systems,
         extraction.engagement,
+        extraction.is_off_topic,
     );
 
     // Step 2b: Suspicion scoring — check whether this turn carried clinical signal.
@@ -169,10 +188,10 @@ pub async fn process_turn(
     let current_off_topic = s
         .sessions
         .with_session(session_id, |session| {
-            if has_signal {
-                session.off_topic_turns = 0;
-            } else {
+            if extraction.is_off_topic {
                 session.off_topic_turns += 1;
+            } else {
+                session.off_topic_turns = 0;
             }
             session.off_topic_turns
         })
@@ -195,28 +214,6 @@ pub async fn process_turn(
         eprintln!("[session {session_id}] off-topic warning #{current_off_topic}");
         return Some(TurnResult {
             response: "I want to make sure I'm being helpful — I'm designed to assist with supplement questions based on your symptoms. One more message I can't connect to health topics and I'll need to close the session. What symptoms or concerns can I help you with?".to_string(),
-            phase: s.sessions.with_session(session_id, |session| {
-                match session.phase {
-                    intake_agent::session::IntakePhase::ChiefComplaint => "chief_complaint",
-                    intake_agent::session::IntakePhase::Hpi => "hpi",
-                    intake_agent::session::IntakePhase::ReviewOfSystems => "review_of_systems",
-                    intake_agent::session::IntakePhase::Differentiation => "differentiation",
-                    intake_agent::session::IntakePhase::CausationInquiry => "causation_inquiry",
-                    intake_agent::session::IntakePhase::PreRecommendation => "pre_recommendation",
-                    intake_agent::session::IntakePhase::Recommendation => "recommendation",
-                    intake_agent::session::IntakePhase::FollowUp => "follow_up",
-                }.to_string()
-            }).await.unwrap_or_else(|| "chief_complaint".to_string()),
-            emergency: false,
-            complete: false,
-            candidate_count: 0,
-            citations: vec![],
-            debug_llm_prompt: None,
-        });
-    } else if current_off_topic == 1 && !has_signal {
-        eprintln!("[session {session_id}] off-topic warning #1");
-        return Some(TurnResult {
-            response: "I didn't quite catch any health-related details in that — I'm here to help with supplement questions. Could you tell me more about the symptoms or concerns you're experiencing?".to_string(),
             phase: s.sessions.with_session(session_id, |session| {
                 match session.phase {
                     intake_agent::session::IntakePhase::ChiefComplaint => "chief_complaint",
@@ -284,7 +281,7 @@ pub async fn process_turn(
                 }
             }
 
-            eprintln!(
+            debug_log!(
                 "[session {}] oldcarts filled: {}/9 | profiles: {:?}",
                 session.id,
                 session.oldcarts.filled_count(),
@@ -294,20 +291,10 @@ pub async fn process_turn(
         .await?;
 
     // Step 3b: Generate a one-sentence summary of what the user communicated this turn.
-    // Include the last agent message for context so short replies like "3 to 4" are interpretable.
-    let last_agent_turn = s
-        .sessions
-        .with_session(session_id, |session| {
-            session.turns.iter().rev()
-                .find(|t| t.role == intake_agent::session::TurnRole::Agent)
-                .map(|t| t.text.clone())
-        })
-        .await
-        .flatten();
-
+    // Reuse last_bot_question (already fetched above for extraction).
     let turn_summary = {
-        let context = if let Some(ref agent_msg) = last_agent_turn {
-            format!("Previous bot message: {}\nUser reply: {}", agent_msg, user_message)
+        let context = if let Some(ref q) = last_bot_question {
+            format!("Previous bot message: {}\nUser reply: {}", q, user_message)
         } else {
             format!("User message: {}", user_message)
         };
@@ -328,6 +315,54 @@ pub async fn process_turn(
             session.add_turn_summary(turn_summary);
         })
         .await;
+
+    // Step 3c: Planner — decide what to acknowledge and which topics are
+    // covered in conversation even if extraction missed structured fields.
+    let planner_decision = {
+        let (phase_str, complaint, summaries, filled, checklist_rx, checklist_cond, checklist_supp) =
+            s.sessions.with_session(session_id, |session| {
+                let phase = format!("{:?}", session.phase);
+                let complaint = session.chief_complaints.first()
+                    .map(|cc| cc.raw_text.clone())
+                    .unwrap_or_default();
+                let summaries = session.turn_summaries.clone();
+                let mut filled: Vec<&'static str> = Vec::new();
+                if session.oldcarts.onset.is_some() { filled.push("onset"); }
+                if session.oldcarts.location.is_some() { filled.push("location"); }
+                if session.oldcarts.duration.is_some() { filled.push("duration"); }
+                if session.oldcarts.character.is_some() { filled.push("character"); }
+                if !session.oldcarts.aggravating.is_empty() { filled.push("aggravating"); }
+                if !session.oldcarts.alleviating.is_empty() { filled.push("alleviating"); }
+                if session.oldcarts.radiation.is_some() { filled.push("radiation"); }
+                if session.oldcarts.timing.is_some() { filled.push("timing"); }
+                if session.oldcarts.severity.is_some() { filled.push("severity"); }
+                let rx = session.checklist.prescriptions_asked;
+                let cond = session.checklist.health_conditions_asked;
+                let supp = session.checklist.otc_and_supplements_asked;
+                (phase, complaint, summaries, filled, rx, cond, supp)
+            })
+            .await
+            .unwrap_or_else(|| (String::new(), String::new(), vec![], vec![], false, false, false));
+
+        planner::plan_turn(
+            &phase_str,
+            &complaint,
+            &summaries,
+            &filled,
+            last_bot_question.as_deref(),
+            checklist_rx,
+            checklist_cond,
+            checklist_supp,
+            s.extractor.as_ref(),
+        ).await
+    };
+
+    debug_log!(
+        "[session {session_id}] planner: acknowledge={:?} covered={:?} skip={:?}",
+        planner_decision.acknowledge,
+        planner_decision.topics_covered_in_conversation,
+        planner_decision.skip_dimensions,
+    );
 
     // Step 4: Map concepts to graph nodes (for body systems, mechanisms, etc.)
     for symptom in &extraction.symptoms {
@@ -351,7 +386,7 @@ pub async fn process_turn(
         )
         .await;
 
-        eprintln!(
+        debug_log!(
             "[session {session_id}] symptom resolver: {:?} → {:?}",
             extraction.symptoms, resolved
         );
@@ -429,7 +464,7 @@ pub async fn process_turn(
     let engine = IntakeEngine::new(&s.intake_store);
     let turn_action = engine.next_turn(&traversal_ctx).await;
 
-    eprintln!(
+    debug_log!(
         "[session {session_id}] engine trace: {}",
         turn_action.trace.join(" → ")
     );
@@ -479,9 +514,9 @@ pub async fn process_turn(
             }
         }
     }
-    eprintln!(
-        "[session {session_id}] executor systems from profiles: {:?}",
-        profile_systems
+    debug_log!(
+        "[session {session_id}] executor symptoms: {:?}, systems from profiles: {:?}",
+        all_symptoms, profile_systems
     );
 
     let (candidate_names, disclosed_meds, disclosed_supps, lens_level) = s
@@ -513,6 +548,12 @@ pub async fn process_turn(
             lens_level,
         )
         .await;
+
+    debug_log!(
+        "[session {session_id}] executor returned {} candidate(s), {} graph_action(s)",
+        action_results.candidates.len(),
+        turn_action.graph_actions.len()
+    );
 
     // Step 8: Update session — candidates, phase, lens, visited questions
     let new_phase = s
@@ -608,10 +649,17 @@ pub async fn process_turn(
         .await?;
 
     // Step 9: Build context v2 + call renderer LLM
+    let planner_hints = context::PlannerHints {
+        acknowledge: planner_decision.acknowledge,
+        topics_covered_in_conversation: planner_decision.topics_covered_in_conversation,
+        skip_dimensions: planner_decision.skip_dimensions,
+        do_not_ask_again: planner_decision.do_not_ask_again,
+    };
+
     let intake_context = s
         .sessions
         .with_session(session_id, |session| {
-            context::build_context_v2(session, &turn_action, &action_results, &relevant_dims)
+            context::build_context_v2(session, &turn_action, &action_results, &relevant_dims, &planner_hints)
         })
         .await?;
 
@@ -692,6 +740,11 @@ pub async fn process_turn(
     // Look up PubMed citations for any candidate ingredients mentioned in the
     // response. This runs on every turn — not just at recommendation — so
     // the citations panel opens as soon as we first name a supplement.
+    let session_candidate_count = state.inner.sessions
+        .with_session(session_id, |session| session.candidates.len())
+        .await
+        .unwrap_or(0);
+    debug_log!("[session {session_id}] citation check: session has {session_candidate_count} candidate(s), phase={phase_str}");
     let citations = gather_citations_for_response(state, session_id, &safe_response).await;
 
     let debug_llm_prompt = if state.inner.debug_llm_prompt {
@@ -724,20 +777,30 @@ async fn gather_citations_for_response(
 ) -> Vec<CitationRef> {
     let response_lower = response_text.to_lowercase();
 
-    let (candidates, context_terms): (Vec<String>, Vec<String>) = match state.inner.sessions
+    // Pull candidates + session symptom/system context for ranking
+    let (candidates, symptom_terms, system_terms) = match state.inner.sessions
         .with_session(session_id, |session| {
-            let cands = session.candidates.top(10).iter().map(|c| c.ingredient.clone()).collect();
-            // Collect symptoms and systems from the conversation for relevance ranking
-            let mut terms: Vec<String> = Vec::new();
+            let cands = session.candidates.top(10).iter().map(|c| c.ingredient.clone()).collect::<Vec<_>>();
+
+            // Primary: chief complaint symptoms and active profile names
+            let mut symptoms: Vec<String> = Vec::new();
             for cc in &session.chief_complaints {
+                symptoms.push(cc.raw_text.to_lowercase());
                 for s in &cc.mapped_symptoms {
-                    terms.push(s.to_lowercase());
-                }
-                for s in &cc.mapped_systems {
-                    terms.push(s.to_lowercase());
+                    symptoms.push(s.to_lowercase());
                 }
             }
-            (cands, terms)
+            for profile_id in &session.active_profiles {
+                symptoms.push(profile_id.replace('_', " "));
+            }
+
+            // Secondary: body systems
+            let systems: Vec<String> = session.chief_complaints.iter()
+                .flat_map(|cc| cc.mapped_systems.iter())
+                .map(|s| s.to_lowercase())
+                .collect();
+
+            (cands, symptoms, systems)
         })
         .await
     {
@@ -745,52 +808,49 @@ async fn gather_citations_for_response(
         None => return vec![],
     };
 
-    // Extract medically-relevant keywords from the response text
-    let mut all_context = context_terms;
-    let stop_words: &[&str] = &[
-        "that", "this", "with", "from", "your", "have", "been", "what",
-        "would", "could", "should", "about", "like", "some", "other",
-        "more", "also", "just", "very", "well", "much", "still", "long",
-        "help", "looking", "options", "dealing", "described", "based",
-        "today", "lately", "supplement", "supplements", "recommend",
-    ];
-    for word in response_lower.split_whitespace() {
-        let w = word.trim_matches(|c: char| !c.is_alphanumeric());
-        if w.len() > 4 && !stop_words.contains(&w) {
-            all_context.push(w.to_string());
-        }
-    }
-
     // Only gather citations for ingredients actually named in this response
     let mentioned: Vec<String> = candidates
         .into_iter()
         .filter(|name| response_lower.contains(&name.to_lowercase()))
         .collect();
 
+    debug_log!(
+        "[citations] response mentions {:?} (symptoms={:?})",
+        mentioned, symptom_terms
+    );
+
     if mentioned.is_empty() {
         return vec![];
     }
 
-    gather_citations_for_ingredients(state, &mentioned, &all_context).await
+    let results = gather_citations_for_ingredients(
+        state, &mentioned, &symptom_terms, &system_terms,
+    ).await;
+    debug_log!("[citations] found {} citation(s)", results.len());
+    results
 }
 
 /// Look up PubMed citations for a specific list of ingredient names.
-/// Returns up to 3 citations per ingredient, preferring those relevant to the
-/// conversation context (symptoms, systems, response keywords).
+///
+/// Ranking priority (highest first):
+///   1. target_node directly matches a user symptom — most relevant
+///   2. sentence contains a symptom term
+///   3. target_node matches a body system
+///   4. sentence contains a system term
+///   5. confidence score only (fallback)
 async fn gather_citations_for_ingredients(
     state: &AppState,
     ingredients: &[String],
-    context_terms: &[String],
+    symptom_terms: &[String],
+    system_terms: &[String],
 ) -> Vec<CitationRef> {
     let mut result = Vec::new();
 
     for ingredient in ingredients {
-        // Query the pre-populated edge_citation table by ingredient name.
         let records = state.inner.source.citations_for_ingredient(ingredient).await;
 
         let mut seen_pmids = std::collections::HashSet::new();
-        let mut relevant: Vec<(f64, CitationRef)> = Vec::new();
-        let mut fallback: Vec<(f64, CitationRef)> = Vec::new();
+        let mut scored: Vec<(f64, CitationRef)> = Vec::new();
 
         for r in records {
             let pmid: u64 = match r.pmid.parse().ok() {
@@ -800,41 +860,49 @@ async fn gather_citations_for_ingredients(
             if !seen_pmids.insert(pmid) { continue; }
 
             let sentence_lower = r.sentence.to_lowercase();
+            let target_lower = r.target_node.to_lowercase();
 
-            // Skip citations with negative evidence or irrelevant framing
             if sentence_is_negative(&sentence_lower) {
                 continue;
             }
 
-            let mut keyword_hits: f64 = 0.0;
-            for term in context_terms {
-                if sentence_lower.contains(term.as_str()) {
-                    keyword_hits += 1.0;
-                }
-            }
+            // Tier 1: target_node directly matches a symptom (strongest signal)
+            let target_symptom_hit = symptom_terms.iter()
+                .any(|s| target_lower.contains(s.as_str()) || s.contains(target_lower.as_str()));
 
-            let cite = CitationRef {
+            // Tier 2: sentence contains a symptom term
+            let sentence_symptom_hits = symptom_terms.iter()
+                .filter(|s| sentence_lower.contains(s.as_str()))
+                .count() as f64;
+
+            // Tier 3: target_node matches a body system
+            let target_system_hit = system_terms.iter()
+                .any(|s| target_lower.contains(s.as_str()) || s.contains(target_lower.as_str()));
+
+            // Tier 4: sentence contains a system term
+            let sentence_system_hits = system_terms.iter()
+                .filter(|s| sentence_lower.contains(s.as_str()))
+                .count() as f64;
+
+            // Composite score: tier weights keep priorities clear
+            let score = if target_symptom_hit   { 1000.0 } else { 0.0 }
+                      + sentence_symptom_hits * 100.0
+                      + if target_system_hit { 10.0 } else { 0.0 }
+                      + sentence_system_hits
+                      + r.confidence; // tiebreaker
+
+            scored.push((score, CitationRef {
                 ingredient: ingredient.clone(),
                 pmid,
                 url: format!("https://pubmed.ncbi.nlm.nih.gov/{}/", pmid),
                 sentence: r.sentence,
                 confidence: r.confidence,
-            };
-
-            if keyword_hits > 0.0 {
-                // Score: keyword hits dominate, confidence breaks ties
-                relevant.push((keyword_hits * 10.0 + r.confidence, cite));
-            } else {
-                fallback.push((r.confidence, cite));
-            }
+            }));
         }
 
-        // Prefer citations that match conversation context; fall back to
-        // confidence-only if nothing relevant was found
-        let chosen = if relevant.is_empty() { &mut fallback } else { &mut relevant };
-        chosen.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        chosen.truncate(3);
-        result.extend(chosen.drain(..).map(|(_, c)| c));
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(3);
+        result.extend(scored.into_iter().map(|(_, c)| c));
     }
 
     result
@@ -893,7 +961,7 @@ async fn gather_citations(state: &AppState, session_id: &Uuid) -> Vec<CitationRe
         None => return vec![],
     };
 
-    gather_citations_for_ingredients(state, &candidates, &[]).await
+    gather_citations_for_ingredients(state, &candidates, &[], &[]).await
 }
 
 // ---------------------------------------------------------------------------

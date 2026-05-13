@@ -336,14 +336,26 @@ impl<'a> QueryEngine<'a> {
     ) -> Vec<RecommendationResult> {
         // Resolve through aliases
         let canonical = self.merge.resolve(symptom).await;
+        crate::debug_log!("[query] ingredients_for_symptom: input={:?} canonical={:?}", symptom, canonical);
         let symptom_idx = match self.graph.find_node(&canonical).await {
             Some(idx) => idx,
-            None => return vec![],
+            None => {
+                crate::debug_log!("[query] find_node({:?}) → NOT FOUND", canonical);
+                return vec![];
+            }
         };
         let symptom_data = match self.graph.node_data(&symptom_idx).await {
             Some(d) if d.node_type == NodeType::Symptom => d,
-            _ => return vec![],
+            Some(d) => {
+                crate::debug_log!("[query] node {:?} found but wrong type: {:?}", canonical, d.node_type);
+                return vec![];
+            }
+            None => {
+                crate::debug_log!("[query] node_data({:?}) → None", canonical);
+                return vec![];
+            }
         };
+        crate::debug_log!("[query] found symptom node {:?}, running patterns", canonical);
 
         let mut all_paths: Vec<(NodeIndex, NodeData, TraversalPath)> = Vec::new();
 
@@ -1220,7 +1232,7 @@ mod tests {
     async fn build_test_graph() -> (KnowledgeGraph, SourceStore, MergeStore) {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
         let source = kg.source_store();
-        let merge = MergeStore::new(kg.db());
+        let merge = MergeStore::new(kg.api().clone());
 
         let cramps = kg
             .add_node(NodeData::new("Muscle Cramps", NodeType::Symptom))

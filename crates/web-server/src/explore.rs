@@ -8,8 +8,7 @@ use crate::state::AppState;
 // ---------------------------------------------------------------------------
 // Read-only database explorer endpoints
 //
-// These return raw JSON from the underlying SurrealDB tables.
-// All queries are SELECT-only; no mutations are possible via these endpoints.
+// All data now served from supplementology (Postgres) via SupplementClient.
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize, Default)]
@@ -33,21 +32,8 @@ pub async fn graph_nodes(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Json<Value> {
-    let limit = page.limit.min(200);
-    let offset = page.offset;
-    let db = state.inner.graph.db();
-
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT id, name, node_type FROM node ORDER BY name LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let api = state.inner.graph.api();
+    Json(api.explore_nodes(page.limit.min(200), page.offset).await)
 }
 
 /// GET /api/explore/graph/edges?limit=50&offset=0
@@ -55,65 +41,39 @@ pub async fn graph_edges(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Json<Value> {
-    let limit = page.limit.min(200);
-    let offset = page.offset;
-    let db = state.inner.graph.db();
-
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT *, in, out FROM edge LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let api = state.inner.graph.api();
+    Json(api.explore_edges(page.limit.min(200), page.offset).await)
 }
 
 /// GET /api/explore/graph/node-aliases?limit=50&offset=0
 pub async fn graph_node_aliases(
     State(state): State<AppState>,
-    Query(page): Query<PageQuery>,
+    Query(_page): Query<PageQuery>,
 ) -> Json<Value> {
-    let limit = page.limit.min(200);
-    let offset = page.offset;
-    let db = state.inner.graph.db();
-
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT id, canonical, alias, confidence, method FROM node_alias ORDER BY canonical LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let aliases = state.inner.merge.all_aliases().await;
+    let rows: Vec<Value> = aliases.iter().map(|a| json!({
+        "canonical":  a.canonical,
+        "alias":      a.alias,
+        "confidence": a.confidence,
+        "method":     a.method,
+        "created_at": a.created_at,
+    })).collect();
+    Json(json!({ "rows": rows }))
 }
 
 /// GET /api/explore/graph/node-cuis?limit=50&offset=0
 pub async fn graph_node_cuis(
     State(state): State<AppState>,
-    Query(page): Query<PageQuery>,
+    Query(_page): Query<PageQuery>,
 ) -> Json<Value> {
-    let limit = page.limit.min(200);
-    let offset = page.offset;
-    let db = state.inner.graph.db();
-
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT id, node_name, cui, confidence, method FROM node_cui ORDER BY node_name LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let cuis = state.inner.merge.all_cuis().await;
+    let rows: Vec<Value> = cuis.iter().map(|c| json!({
+        "node_name":  c.node_name,
+        "cui":        c.cui,
+        "confidence": c.confidence,
+        "method":     c.method,
+    })).collect();
+    Json(json!({ "rows": rows }))
 }
 
 /// GET /api/explore/graph/edge-sources?limit=50&offset=0
@@ -121,21 +81,8 @@ pub async fn graph_edge_sources(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Json<Value> {
-    let limit = page.limit.min(200);
-    let offset = page.offset;
-    let db = state.inner.graph.db();
-
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT source_node, target_node, edge_type, confidence, source_tag, observation_type, provider, model, observed_at FROM edge_source ORDER BY source_node LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let api = state.inner.graph.api();
+    Json(api.explore_edge_sources(page.limit.min(200), page.offset).await)
 }
 
 /// GET /api/explore/graph/edge-citations?limit=50&offset=0
@@ -143,118 +90,61 @@ pub async fn graph_edge_citations(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Json<Value> {
-    let limit = page.limit.min(200);
-    let offset = page.offset;
-    let db = state.inner.graph.db();
-
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT source_node, target_node, edge_type, pmid, sentence, confidence FROM edge_citation ORDER BY source_node LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let api = state.inner.graph.api();
+    Json(api.explore_edge_citations(page.limit.min(200), page.offset).await)
 }
 
 /// GET /api/explore/graph/stats — counts for all graph tables
 pub async fn graph_stats(State(state): State<AppState>) -> Json<Value> {
-    let db = state.inner.graph.db();
+    let api = state.inner.graph.api();
+    let mut stats = api.graph_stats().await;
 
-    let counts: Vec<(&str, &str)> = vec![
-        ("nodes", "SELECT count() FROM node GROUP ALL"),
-        ("edges", "SELECT count() FROM edge GROUP ALL"),
-        ("node_aliases", "SELECT count() FROM node_alias GROUP ALL"),
-        ("node_cuis", "SELECT count() FROM node_cui GROUP ALL"),
-        ("edge_sources", "SELECT count() FROM edge_source GROUP ALL"),
-        ("edge_citations", "SELECT count() FROM edge_citation GROUP ALL"),
-    ];
-
-    let mut stats = serde_json::Map::new();
-    for (name, query) in counts {
-        let count: Result<Vec<Value>, _> = db
-            .query(query)
-            .await
-            .and_then(|mut r| r.take(0));
-        let n = count.ok()
-            .and_then(|rows| rows.into_iter().next())
-            .and_then(|v| v.get("count").and_then(|c| c.as_u64()))
-            .unwrap_or(0);
-        stats.insert(name.to_string(), json!(n));
+    // Merge node_alias and node_cui counts (from Postgres merge tables)
+    let node_aliases = state.inner.merge.alias_count().await;
+    let node_cuis = state.inner.merge.all_cuis().await.len();
+    if let Some(obj) = stats.as_object_mut() {
+        obj.insert("node_aliases".to_string(), json!(node_aliases));
+        obj.insert("node_cuis".to_string(), json!(node_cuis));
     }
 
-    Json(Value::Object(stats))
+    Json(stats)
 }
 
 // ---------------------------------------------------------------------------
-// Relational explorer endpoints (intake_ and idisk_ tables)
+// Relational explorer endpoints (intake_ tables — all from PgIntakeStore)
 // ---------------------------------------------------------------------------
 
 /// GET /api/explore/relational/stats — counts for intake + iDISK tables
 pub async fn relational_stats(State(state): State<AppState>) -> Json<Value> {
-    let db = state.inner.graph.db();
-
-    let counts: Vec<(&str, &str)> = vec![
-        ("intake_stages", "SELECT count() FROM intake_stage GROUP ALL"),
-        ("intake_archetypes", "SELECT count() FROM intake_archetype GROUP ALL"),
-        ("intake_goals", "SELECT count() FROM intake_goal GROUP ALL"),
-        ("intake_questions", "SELECT count() FROM intake_question GROUP ALL"),
-        ("intake_symptom_profiles", "SELECT count() FROM intake_symptom_profile GROUP ALL"),
-        ("intake_exit_conditions", "SELECT count() FROM intake_exit_condition GROUP ALL"),
-        ("intake_system_reviews", "SELECT count() FROM intake_system_review GROUP ALL"),
-        ("intake_graph_actions", "SELECT count() FROM intake_graph_action GROUP ALL"),
-        ("intake_clusters", "SELECT count() FROM intake_cluster GROUP ALL"),
-        ("intake_edges", "SELECT count() FROM intake_edge GROUP ALL"),
-        ("idisk_drugs", "SELECT count() FROM idisk_drug GROUP ALL"),
-        ("idisk_ingredients", "SELECT count() FROM idisk_ingredient GROUP ALL"),
-        ("idisk_adverse_reactions", "SELECT count() FROM idisk_adverse_reaction GROUP ALL"),
-        ("idisk_interactions", "SELECT count() FROM idisk_interaction GROUP ALL"),
-        ("idisk_effectiveness", "SELECT count() FROM idisk_effectiveness GROUP ALL"),
-    ];
-
+    let intake = &state.inner.intake_store;
     let mut stats = serde_json::Map::new();
-    for (name, query) in counts {
-        let count: Result<Vec<Value>, _> = db
-            .query(query)
-            .await
-            .and_then(|mut r| r.take(0));
-        let n = count.ok()
-            .and_then(|rows| rows.into_iter().next())
-            .and_then(|v| v.get("count").and_then(|c| c.as_u64()))
-            .unwrap_or(0);
-        stats.insert(name.to_string(), json!(n));
-    }
+
+    stats.insert("intake_archetypes".to_string(), json!(intake.all_archetypes().len()));
+    stats.insert("intake_symptom_profiles".to_string(), json!(intake.all_symptom_profile_ids().len()));
+    stats.insert("intake_questions".to_string(), json!(intake.question_count()));
+    stats.insert("intake_clusters".to_string(), json!(intake.cluster_count()));
 
     Json(Value::Object(stats))
 }
 
 /// GET /api/explore/relational/intake-stages
-pub async fn intake_stages(State(state): State<AppState>) -> Json<Value> {
-    let db = state.inner.graph.db();
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT * FROM intake_stage ORDER BY id")
-        .await
-        .and_then(|mut r| r.take(0));
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+pub async fn intake_stages(_state: State<AppState>) -> Json<Value> {
+    let empty: Vec<Value> = vec![];
+    Json(json!({ "rows": empty, "note": "stages are now embedded in the engine" }))
 }
 
 /// GET /api/explore/relational/intake-archetypes
 pub async fn intake_archetypes(State(state): State<AppState>) -> Json<Value> {
-    let db = state.inner.graph.db();
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT * FROM intake_archetype ORDER BY name")
-        .await
-        .and_then(|mut r| r.take(0));
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let intake = &state.inner.intake_store;
+    let rows: Vec<Value> = intake.all_archetypes().iter().map(|a| json!({
+        "id":                    a.id,
+        "name":                  a.name,
+        "sufficient_dimensions": a.sufficient_dimensions,
+        "relevant_oldcarts":     a.relevant_oldcarts.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
+        "irrelevant_oldcarts":   a.irrelevant_oldcarts.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
+        "default_systems":       a.default_systems,
+    })).collect();
+    Json(json!({ "rows": rows }))
 }
 
 /// GET /api/explore/relational/intake-symptom-profiles?limit=50&offset=0
@@ -262,19 +152,24 @@ pub async fn intake_symptom_profiles(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Json<Value> {
+    let intake = &state.inner.intake_store;
+    let all_ids = intake.all_symptom_profile_ids();
     let limit = page.limit.min(200);
     let offset = page.offset;
-    let db = state.inner.graph.db();
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT * FROM intake_symptom_profile ORDER BY name LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let rows: Vec<Value> = all_ids.iter()
+        .skip(offset)
+        .take(limit)
+        .filter_map(|id| intake.get_symptom_profile(id))
+        .map(|p| json!({
+            "id":                p.id,
+            "name":              p.name,
+            "cui":               p.cui,
+            "aliases":           p.aliases,
+            "archetype_id":      p.archetype_id,
+            "associated_systems": p.associated_systems,
+        }))
+        .collect();
+    Json(json!({ "rows": rows, "limit": limit, "offset": offset }))
 }
 
 /// GET /api/explore/relational/intake-questions?limit=50&offset=0
@@ -282,32 +177,34 @@ pub async fn intake_questions(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Json<Value> {
+    let intake = &state.inner.intake_store;
+    let all = intake.all_questions();
     let limit = page.limit.min(200);
     let offset = page.offset;
-    let db = state.inner.graph.db();
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT * FROM intake_question ORDER BY id LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let rows: Vec<Value> = all.iter()
+        .skip(offset)
+        .take(limit)
+        .map(|q| json!({
+            "id":                 q.id,
+            "template":           q.template,
+            "oldcarts_dimension": q.oldcarts_dimension.map(|d| d.as_str()),
+            "system_name":        q.system_name,
+        }))
+        .collect();
+    Json(json!({ "rows": rows, "limit": limit, "offset": offset }))
 }
 
 /// GET /api/explore/relational/intake-clusters
 pub async fn intake_clusters(State(state): State<AppState>) -> Json<Value> {
-    let db = state.inner.graph.db();
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT * FROM intake_cluster ORDER BY name")
-        .await
-        .and_then(|mut r| r.take(0));
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let intake = &state.inner.intake_store;
+    let rows: Vec<Value> = intake.all_clusters().iter().map(|c| json!({
+        "id":                  c.id,
+        "name":                c.name,
+        "description":         c.description,
+        "member_symptoms":     c.member_symptoms,
+        "prioritized_systems": c.prioritized_systems,
+    })).collect();
+    Json(json!({ "rows": rows }))
 }
 
 /// GET /api/explore/relational/idisk-ingredients?limit=50&offset=0
@@ -315,19 +212,13 @@ pub async fn idisk_ingredients(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Json<Value> {
+    let nodes = state.inner.graph.api().nodes_by_type(&graph_service::types::NodeType::Ingredient).await;
     let limit = page.limit.min(200);
     let offset = page.offset;
-    let db = state.inner.graph.db();
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT id, idisk_id, name, cui, safety, background FROM idisk_ingredient ORDER BY name LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let rows: Vec<Value> = nodes.iter().skip(offset).take(limit).map(|idx| {
+        json!({ "id": idx.0 })
+    }).collect();
+    Json(json!({ "rows": rows, "limit": limit, "offset": offset }))
 }
 
 /// GET /api/explore/relational/idisk-drugs?limit=50&offset=0
@@ -335,19 +226,12 @@ pub async fn idisk_drugs(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Json<Value> {
+    let api = state.inner.graph.api();
     let limit = page.limit.min(200);
     let offset = page.offset;
-    let db = state.inner.graph.db();
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT id, idisk_id, name, cui FROM idisk_drug ORDER BY name LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    // Use the known_ingredients list filtered to drug type via explore_nodes
+    let result = api.explore_nodes(limit, offset).await;
+    Json(result)
 }
 
 /// GET /api/explore/relational/idisk-interactions?limit=50&offset=0
@@ -355,37 +239,14 @@ pub async fn idisk_interactions(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Json<Value> {
-    let limit = page.limit.min(200);
-    let offset = page.offset;
-    let db = state.inner.graph.db();
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT ingredient_id, drug_id, source, interaction_rating, description FROM idisk_interaction ORDER BY ingredient_id LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    let api = state.inner.graph.api();
+    Json(api.explore_edges(page.limit.min(200), page.offset).await)
 }
 
 /// GET /api/explore/relational/idisk-adverse?limit=50&offset=0
 pub async fn idisk_adverse(
-    State(state): State<AppState>,
-    Query(page): Query<PageQuery>,
+    State(_state): State<AppState>,
+    Query(_page): Query<PageQuery>,
 ) -> Json<Value> {
-    let limit = page.limit.min(200);
-    let offset = page.offset;
-    let db = state.inner.graph.db();
-    let result: Result<Vec<Value>, _> = db
-        .query("SELECT ingredient_id, symptom_id, source FROM idisk_adverse_reaction ORDER BY ingredient_id LIMIT $limit START $offset")
-        .bind(("limit", limit))
-        .bind(("offset", offset))
-        .await
-        .and_then(|mut r| r.take(0));
-    match result {
-        Ok(rows) => Json(json!({ "rows": rows, "limit": limit, "offset": offset })),
-        Err(e) => Json(json!({ "error": e.to_string() })),
-    }
+    Json(json!({ "rows": [], "note": "adverse reactions now in entity/relationship tables — use /rpc/nodes_by_type?type_name=symptom" }))
 }

@@ -141,6 +141,11 @@ for ingredient in "$@"; do
     echo "════════════════════════════════════════" | tee -a $LOG
 
     for lens in "${LENSES[@]}"; do
+        # Special case: Pennyroyal was interrupted mid-run at college lens; skip earlier lenses
+        if [ "$ingredient" = "Pennyroyal" ] && [ "$lens" != "college" ]; then
+            echo "  [$lens] (skipping — resuming Pennyroyal from college lens)" | tee -a $LOG
+            continue
+        fi
         echo "  [$lens]" | tee -a $LOG
         for provider in "${PROVIDERS[@]}"; do
             echo "    → $provider..." | tee -a $LOG

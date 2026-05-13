@@ -1,6 +1,15 @@
 use crate::differentiator::Differentiator;
 use crate::session::{IntakePhase, IntakeSession, TurnRole};
 
+/// Planner decision passed in from web-server — kept as a plain struct here
+/// so intake-agent doesn't depend on the web-server crate.
+pub struct PlannerHints {
+    pub acknowledge: String,
+    pub topics_covered_in_conversation: Vec<String>,
+    pub skip_dimensions: Vec<String>,
+    pub do_not_ask_again: Vec<String>,
+}
+
 use graph_service::intake::executor::ActionResults;
 use graph_service::intake::types::{IntakeStageId, OldcartsDimension, TurnAction};
 
@@ -262,6 +271,7 @@ pub fn build_context_v2(
     turn_action: &TurnAction,
     action_results: &ActionResults,
     relevant_dimensions: &[OldcartsDimension],
+    planner: &PlannerHints,
 ) -> IntakeContext {
     let mut prompt = String::with_capacity(4096);
 
@@ -401,27 +411,87 @@ pub fn build_context_v2(
     }
 
     // --- Already-asked OLDCARTS dimensions — do NOT repeat these ---
-    // This prevents the LLM from going off-script and re-asking questions
-    // the engine already covered, even when turn_action.question is None.
-    let already_covered: Vec<&str> = {
-        let mut covered = Vec::new();
-        if session.oldcarts.onset.is_some() { covered.push("onset (when it started)"); }
-        if session.oldcarts.location.is_some() { covered.push("location (where)"); }
-        if session.oldcarts.duration.is_some() { covered.push("duration (how long)"); }
-        if session.oldcarts.character.is_some() { covered.push("character (what it feels like)"); }
-        if !session.oldcarts.aggravating.is_empty() { covered.push("aggravating factors"); }
-        if !session.oldcarts.alleviating.is_empty() { covered.push("alleviating factors"); }
-        if session.oldcarts.radiation.is_some() { covered.push("radiation (spread)"); }
-        if session.oldcarts.timing.is_some() { covered.push("timing (pattern)"); }
-        if session.oldcarts.severity.is_some() { covered.push("severity (1-10 scale)"); }
-        covered
-    };
+    // Sources: structured OLDCARTS state + planner's judgment over turn summaries.
+    // The planner catches answers the extractor missed (e.g. "years" for onset).
+    let mut already_covered: Vec<String> = Vec::new();
+    if session.oldcarts.onset.is_some() { already_covered.push("onset (when it started)".into()); }
+    if session.oldcarts.location.is_some() { already_covered.push("location (where)".into()); }
+    if session.oldcarts.duration.is_some() { already_covered.push("duration (how long each episode lasts)".into()); }
+    if session.oldcarts.character.is_some() { already_covered.push("character (what it feels like)".into()); }
+    if !session.oldcarts.aggravating.is_empty() { already_covered.push("aggravating factors".into()); }
+    if !session.oldcarts.alleviating.is_empty() { already_covered.push("alleviating factors".into()); }
+    if session.oldcarts.radiation.is_some() { already_covered.push("radiation (spread)".into()); }
+    if session.oldcarts.timing.is_some() { already_covered.push("timing (pattern)".into()); }
+    if session.oldcarts.severity.is_some() { already_covered.push("severity (1-10 scale)".into()); }
+
+    // Merge planner's conversational coverage — topics answered in summaries
+    // even if the extractor didn't fill the structured field.
+    for topic in &planner.topics_covered_in_conversation {
+        let label = match topic.as_str() {
+            "onset" => "onset (when it started)",
+            "location" => "location (where)",
+            "duration" => "duration (how long each episode lasts)",
+            "character" => "character (what it feels like)",
+            "aggravating" => "aggravating factors",
+            "alleviating" => "alleviating factors",
+            "radiation" => "radiation (spread)",
+            "timing" => "timing (pattern)",
+            "severity" => "severity (1-10 scale)",
+            other => other,
+        };
+        let owned = label.to_string();
+        if !already_covered.contains(&owned) {
+            already_covered.push(owned);
+        }
+    }
+
+    // Also add skip_dimensions from planner (irrelevant for this complaint)
+    for topic in &planner.skip_dimensions {
+        let label = match topic.as_str() {
+            "onset" => "onset (when it started)",
+            "location" => "location (where)",
+            "duration" => "duration (how long each episode lasts)",
+            "character" => "character (what it feels like)",
+            "aggravating" => "aggravating factors",
+            "alleviating" => "alleviating factors",
+            "radiation" => "radiation (spread)",
+            "timing" => "timing (pattern)",
+            "severity" => "severity (1-10 scale)",
+            other => other,
+        };
+        let owned = label.to_string();
+        if !already_covered.contains(&owned) {
+            already_covered.push(owned);
+        }
+    }
+
     if !already_covered.is_empty() {
         prompt.push_str("ALREADY COVERED — DO NOT ASK AGAIN:\n");
         for item in &already_covered {
             prompt.push_str(&format!("  - {}\n", item));
         }
         prompt.push_str("Do not re-ask about any of the above, even indirectly.\n\n");
+    }
+
+    // --- Topics already addressed — do not ask again ---
+    if !planner.do_not_ask_again.is_empty() {
+        prompt.push_str("TOPICS ALREADY ADDRESSED — DO NOT ASK ABOUT THESE AGAIN:\n");
+        for topic in &planner.do_not_ask_again {
+            prompt.push_str(&format!("  - {}\n", topic));
+        }
+        prompt.push_str(
+            "The user has already answered these. Asking again will frustrate them.\n\
+             If you have nothing new to ask, move toward the recommendation.\n\n"
+        );
+    }
+
+    // --- Planner acknowledgement instruction ---
+    if !planner.acknowledge.is_empty() {
+        prompt.push_str(&format!(
+            "ACKNOWLEDGEMENT NEEDED: {}\n\
+             Briefly acknowledge this (one clause). Do NOT then ask about the same topic again.\n\n",
+            planner.acknowledge
+        ));
     }
 
     // --- Safety checklist reminder (suppressed once recommendation is delivered) ---

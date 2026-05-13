@@ -185,10 +185,14 @@ impl SafetyFilter {
         }
 
         // --- 2. Ingredient whitelist check ---
-        // Only runs if the registry was loaded. Scans the response for n-grams
-        // (unigrams, bigrams, trigrams) that match a known ingredient name.
-        // Any match that is NOT in the permitted list is a violation.
-        if !self.known_ingredient_names.is_empty() {
+        // Only runs when candidates exist (permitted list is non-empty).
+        // Before candidates are populated the permitted list is empty, meaning
+        // every known ingredient name would block — including body parts and
+        // clinical words that appear in the 70k-entry registry.
+        //
+        // This check's job is to prevent hallucinated supplements from appearing
+        // in the *recommendation* response, not to police clinical conversation.
+        if !self.known_ingredient_names.is_empty() && !permitted.is_empty() {
             let permitted_lower: HashSet<String> =
                 permitted.iter().map(|s| s.to_lowercase()).collect();
 
@@ -200,13 +204,16 @@ impl SafetyFilter {
                 .collect();
 
             // Check unigrams, bigrams, and trigrams.
-            // Unigrams must be at least 5 chars to avoid false-positives on
-            // common English words that appear in the supplement terms list
-            // (e.g. "also", "base", "ash", "bay", "ace", "bean").
+            // Unigrams must be at least 9 chars — short words like "heart",
+            // "muscle", "sleep", "iron", "ginger" appear in the registry but
+            // are also normal clinical English. True supplement unigrams that
+            // need blocking (quercetin, magnesium, ashwagandha) are longer.
+            // Multi-word n-grams (bigrams/trigrams) are specific enough to
+            // match without the length guard.
             for window_size in 1..=3usize {
                 for window in words.windows(window_size) {
                     let ngram = window.join(" ").to_lowercase();
-                    if window_size == 1 && ngram.len() < 5 {
+                    if window_size == 1 && ngram.len() < 9 {
                         continue;
                     }
                     if self.known_ingredient_names.contains(&ngram)

@@ -346,3 +346,12 @@ pub struct EigScore {
     pub system_relevance: f64,
     pub effective: f64,
 }
+
+/// A drug interaction record returned by the query engine.
+#[derive(Debug, Clone)]
+pub struct DrugInteraction {
+    pub drug_id: String,
+    pub source: String,
+    pub rating: Option<String>,
+    pub description: Option<String>,
+}

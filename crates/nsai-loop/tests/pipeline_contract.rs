@@ -107,7 +107,7 @@ async fn test_pipeline_emits_required_event_types() {
     let sink = MemorySink::new();
     let graph = KnowledgeGraph::in_memory().await.unwrap();
     let source_store = graph.source_store();
-    let merge_store = MergeStore::new(graph.db());
+    let merge_store = MergeStore::new(graph.api().clone());
     let suppkg = make_suppkg();
     let corr_id = Uuid::new_v4();
 
@@ -311,7 +311,7 @@ async fn test_pipeline_synonym_resolution_assigns_cuis() {
     let sink = MemorySink::new();
     let graph = KnowledgeGraph::in_memory().await.unwrap();
     let source_store = graph.source_store();
-    let merge_store = MergeStore::new(graph.db());
+    let merge_store = MergeStore::new(graph.api().clone());
     let suppkg = make_suppkg();
     let corr_id = Uuid::new_v4();
 
@@ -346,7 +346,7 @@ async fn test_pipeline_citation_backing_stores_citations() {
     let sink = MemorySink::new();
     let graph = KnowledgeGraph::in_memory().await.unwrap();
     let source_store = graph.source_store();
-    let merge_store = MergeStore::new(graph.db());
+    let merge_store = MergeStore::new(graph.api().clone());
     let suppkg = make_suppkg();
     let corr_id = Uuid::new_v4();
 

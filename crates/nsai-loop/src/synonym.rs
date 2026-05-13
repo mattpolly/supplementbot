@@ -223,7 +223,7 @@ mod tests {
     #[tokio::test]
     async fn test_assigns_cuis_to_matching_nodes() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let merge = MergeStore::new(graph.db());
+        let merge = MergeStore::new(graph.api().clone());
         let sink = MemorySink::new();
         let suppkg = test_suppkg();
 
@@ -252,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn test_detects_aliases_from_shared_cui() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let merge = MergeStore::new(graph.db());
+        let merge = MergeStore::new(graph.api().clone());
         let sink = MemorySink::new();
         let suppkg = test_suppkg();
 
@@ -290,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn test_skips_nodes_without_cui_match() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let merge = MergeStore::new(graph.db());
+        let merge = MergeStore::new(graph.api().clone());
         let sink = MemorySink::new();
         let suppkg = test_suppkg();
 
@@ -313,7 +313,7 @@ mod tests {
     #[tokio::test]
     async fn test_emits_synonym_event() {
         let graph = KnowledgeGraph::in_memory().await.unwrap();
-        let merge = MergeStore::new(graph.db());
+        let merge = MergeStore::new(graph.api().clone());
         let sink = MemorySink::new();
         let suppkg = test_suppkg();
 

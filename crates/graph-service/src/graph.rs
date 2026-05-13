@@ -1,7 +1,4 @@
 use sqlx::PgPool;
-use surrealdb::engine::any::Any;
-use surrealdb::opt::auth::Root;
-use surrealdb::Surreal;
 use uuid::Uuid;
 
 use crate::client::SupplementClient;
@@ -10,7 +7,7 @@ use crate::types::*;
 
 // ---------------------------------------------------------------------------
 // NodeIndex — opaque handle to an entity in supplementology Postgres.
-// Wraps a UUID. The old SurrealDB RecordId is gone.
+// Wraps a UUID.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -53,47 +50,27 @@ struct RelationshipRow {
 
 // ---------------------------------------------------------------------------
 // KnowledgeGraph — Postgres-backed supplement KB.
-// Holds the PgPool for supplement data + a SurrealDB handle for the intake
-// graph and explore endpoints (which remain on SurrealDB).
+// Backed entirely by supplementology Postgres + API.
 // ---------------------------------------------------------------------------
 
 pub struct KnowledgeGraph {
     pub(crate) pool: PgPool,
-    /// Retained for intake graph store, iDISK, and explore endpoints.
-    db: Surreal<Any>,
     /// HTTP client for read queries — routes through supplementology API.
     api: SupplementClient,
 }
 
 impl KnowledgeGraph {
-    /// Connect to supplementology Postgres (writes) + SurrealDB (intake graph) + API (reads).
-    /// `pg_url` — Postgres connection string (NSAI write path only).
-    /// `api_url` — supplementology API base URL for read queries.
-    /// `surreal_url/user/pass` — SurrealDB credentials (intake graph only).
+    /// Connect to supplementology Postgres (writes) + API (reads).
     pub async fn open(
         pg_url: &str,
         api_url: &str,
-        surreal_url: &str,
-        surreal_user: &str,
-        surreal_pass: &str,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let pool = PgPool::connect(pg_url).await?;
         let api = SupplementClient::new(api_url);
-        let db = surrealdb::engine::any::connect(surreal_url).await?;
-        db.signin(Root {
-            username: surreal_user.to_string(),
-            password: surreal_pass.to_string(),
-        })
-        .await?;
-        db.use_ns("supplementbot").use_db("supplementbot").await?;
-        let _: surrealdb::Result<Vec<serde_json::Value>> = db
-            .query("DEFINE TABLE IF NOT EXISTS edge TYPE RELATION IN node OUT node")
-            .await
-            .and_then(|mut r| r.take(0));
-        Ok(Self { pool, db, api })
+        Ok(Self { pool, api })
     }
 
-    /// Create an in-memory graph for tests (Postgres + in-memory SurrealDB).
+    /// Create a graph for tests (Postgres + API).
     pub async fn in_memory() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let pg_url = std::env::var("SUPPLEMENTOLOGY_DATABASE_URL")
             .unwrap_or_else(|_| "postgresql://supplementology:supplementology@localhost:5433/supplementology".to_string());
@@ -101,14 +78,7 @@ impl KnowledgeGraph {
             .unwrap_or_else(|_| "http://localhost:3001".to_string());
         let pool = PgPool::connect(&pg_url).await?;
         let api = SupplementClient::new(&api_url);
-        let db = surrealdb::engine::any::connect("memory").await?;
-        db.use_ns("supplementbot").use_db("supplementbot").await?;
-        Ok(Self { pool, db, api })
-    }
-
-    /// Get the SurrealDB handle (for intake graph store, iDISK, explore endpoints).
-    pub fn db(&self) -> &Surreal<Any> {
-        &self.db
+        Ok(Self { pool, api })
     }
 
     /// Get the Postgres pool (for SourceStore writes and NSAI loop mutations).

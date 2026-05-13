@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::intake::idisk::DrugInteraction;
+use crate::intake::types::DrugInteraction;
 use crate::source::{
     CitationRecord, EdgeAgreement, EdgeQuality, EdgeWithQuality, MultiProviderEdge,
     ProviderObservation,
@@ -180,6 +180,16 @@ impl SupplementClient {
         format!("{}{}", self.base_url, path)
     }
 
+    /// Public URL builder for use by external modules (e.g. registry).
+    pub fn url_pub(&self, path: &str) -> String {
+        self.url(path)
+    }
+
+    /// Public access to the underlying HTTP client.
+    pub fn http(&self) -> &Client {
+        &self.client
+    }
+
     async fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         req: reqwest::RequestBuilder,
@@ -189,6 +199,14 @@ impl SupplementClient {
             return None;
         }
         resp.json::<T>().await.ok()
+    }
+
+    /// Public version of get_json for use by external modules.
+    pub async fn get_json_pub<T: serde::de::DeserializeOwned>(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Option<T> {
+        self.get_json(req).await
     }
 
     // -- Node lookup ---------------------------------------------------------
@@ -526,6 +544,214 @@ impl SupplementClient {
             member_symptoms: r.member_symptoms,
             prioritized_systems: r.prioritized_systems,
         }).collect()
+    }
+
+    // -- Merge (alias / CUI) ------------------------------------------------
+
+    /// Get all aliases for a canonical name.
+    pub async fn aliases_for(&self, canonical: &str) -> Vec<crate::merge::AliasRecord> {
+        #[derive(Deserialize)]
+        struct Row {
+            canonical: String,
+            alias: String,
+            confidence: f64,
+            method: String,
+            created_at: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Resp { aliases: Vec<Row> }
+
+        let resp: Option<Resp> = self.get_json(
+            self.client.get(self.url("/v1/merge/aliases"))
+                .query(&[("canonical", canonical)])
+        ).await;
+
+        resp.map(|r| r.aliases.into_iter().map(|a| crate::merge::AliasRecord {
+            canonical: a.canonical,
+            alias: a.alias,
+            confidence: a.confidence,
+            method: a.method,
+            created_at: a.created_at.unwrap_or_default(),
+        }).collect())
+        .unwrap_or_default()
+    }
+
+    /// Get all CUI records.
+    pub async fn all_cuis(&self) -> Vec<crate::merge::CuiRecord> {
+        #[derive(Deserialize)]
+        struct Row {
+            node_name: String,
+            cui: String,
+            confidence: f64,
+            method: String,
+        }
+        #[derive(Deserialize)]
+        struct Resp { cuis: Vec<Row> }
+
+        let resp: Option<Resp> = self.get_json(
+            self.client.get(self.url("/v1/merge/cuis"))
+        ).await;
+
+        resp.map(|r| r.cuis.into_iter().map(|c| crate::merge::CuiRecord {
+            node_name: c.node_name,
+            cui: c.cui,
+            confidence: c.confidence,
+            method: c.method,
+        }).collect())
+        .unwrap_or_default()
+    }
+
+    /// Get all alias records.
+    pub async fn all_aliases(&self) -> Vec<crate::merge::AliasRecord> {
+        #[derive(Deserialize)]
+        struct Row {
+            canonical: String,
+            alias: String,
+            confidence: f64,
+            method: String,
+            created_at: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Resp { aliases: Vec<Row> }
+
+        let resp: Option<Resp> = self.get_json(
+            self.client.get(self.url("/v1/merge/aliases"))
+        ).await;
+
+        resp.map(|r| r.aliases.into_iter().map(|a| crate::merge::AliasRecord {
+            canonical: a.canonical,
+            alias: a.alias,
+            confidence: a.confidence,
+            method: a.method,
+            created_at: a.created_at.unwrap_or_default(),
+        }).collect())
+        .unwrap_or_default()
+    }
+
+    /// Resolve a node name through the alias table.
+    /// Returns the canonical name if an alias exists, otherwise returns the input unchanged.
+    pub async fn resolve_alias(&self, name: &str) -> String {
+        #[derive(Deserialize)]
+        struct AliasRow { canonical: String }
+        #[derive(Deserialize)]
+        struct Resp { aliases: Vec<AliasRow> }
+
+        let resp: Option<Resp> = self.get_json(
+            self.client.get(self.url("/v1/merge/aliases"))
+                .query(&[("alias", name)])
+        ).await;
+
+        resp.and_then(|r| r.aliases.into_iter().next().map(|a| a.canonical))
+            .unwrap_or_else(|| name.to_lowercase())
+    }
+
+    /// Get the CUI for a node name (resolving through aliases first).
+    pub async fn cui_for(&self, name: &str) -> Option<String> {
+        let canonical = self.resolve_alias(name).await;
+
+        #[derive(Deserialize)]
+        struct CuiRow { cui: String }
+        #[derive(Deserialize)]
+        struct Resp { cuis: Vec<CuiRow> }
+
+        let resp: Option<Resp> = self.get_json(
+            self.client.get(self.url("/v1/merge/cuis"))
+                .query(&[("node_name", canonical.as_str())])
+        ).await;
+
+        resp.and_then(|r| r.cuis.into_iter().next().map(|c| c.cui))
+    }
+
+    /// Get all CUI-sharing nodes for a given CUI.
+    pub async fn nodes_with_cui(&self, cui: &str) -> Vec<crate::merge::CuiRecord> {
+        #[derive(Deserialize)]
+        struct CuiRow {
+            node_name: String,
+            cui: String,
+            confidence: f64,
+            method: String,
+        }
+        #[derive(Deserialize)]
+        struct Resp { cuis: Vec<CuiRow> }
+
+        let resp: Option<Resp> = self.get_json(
+            self.client.get(self.url("/v1/merge/cuis"))
+                .query(&[("cui", cui)])
+        ).await;
+
+        resp.map(|r| r.cuis.into_iter().map(|c| crate::merge::CuiRecord {
+            node_name: c.node_name,
+            cui: c.cui,
+            confidence: c.confidence,
+            method: c.method,
+        }).collect())
+        .unwrap_or_default()
+    }
+
+    /// Record an alias pair (write path — used by nsai-loop).
+    pub async fn record_alias(&self, canonical: &str, alias: &str, confidence: f64, method: &str) {
+        let body = serde_json::json!({
+            "canonical": canonical,
+            "alias": alias,
+            "confidence": confidence,
+            "method": method,
+        });
+        let _ = self.client
+            .post(self.url("/v1/merge/aliases"))
+            .json(&body)
+            .send()
+            .await;
+    }
+
+    /// Record a CUI mapping (write path — used by nsai-loop).
+    pub async fn record_cui(&self, node_name: &str, cui: &str, confidence: f64, method: &str) {
+        let body = serde_json::json!({
+            "node_name": node_name,
+            "cui": cui,
+            "confidence": confidence,
+            "method": method,
+        });
+        let _ = self.client
+            .post(self.url("/v1/merge/cuis"))
+            .json(&body)
+            .send()
+            .await;
+    }
+
+    // -- Explore (paginated browse for DB explorer UI) -----------------------
+
+    pub async fn explore_nodes(&self, limit: usize, offset: usize) -> serde_json::Value {
+        self.get_json(
+            self.client.get(self.url("/v1/graph/nodes"))
+                .query(&[("limit", limit), ("offset", offset)])
+        ).await.unwrap_or(serde_json::json!({ "rows": [] }))
+    }
+
+    pub async fn explore_edges(&self, limit: usize, offset: usize) -> serde_json::Value {
+        self.get_json(
+            self.client.get(self.url("/v1/graph/edges"))
+                .query(&[("limit", limit), ("offset", offset)])
+        ).await.unwrap_or(serde_json::json!({ "rows": [] }))
+    }
+
+    pub async fn explore_edge_sources(&self, limit: usize, offset: usize) -> serde_json::Value {
+        self.get_json(
+            self.client.get(self.url("/v1/graph/edge-sources"))
+                .query(&[("limit", limit), ("offset", offset)])
+        ).await.unwrap_or(serde_json::json!({ "rows": [] }))
+    }
+
+    pub async fn explore_edge_citations(&self, limit: usize, offset: usize) -> serde_json::Value {
+        self.get_json(
+            self.client.get(self.url("/v1/graph/edge-citations"))
+                .query(&[("limit", limit), ("offset", offset)])
+        ).await.unwrap_or(serde_json::json!({ "rows": [] }))
+    }
+
+    pub async fn graph_stats(&self) -> serde_json::Value {
+        self.get_json(
+            self.client.get(self.url("/v1/graph/stats"))
+        ).await.unwrap_or(serde_json::json!({}))
     }
 
     // -- Citations -----------------------------------------------------------

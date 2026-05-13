@@ -47,6 +47,9 @@ pub struct Extraction {
     /// Medications or supplements the user mentioned taking
     #[serde(default)]
     pub medications: Vec<String>,
+    /// True only if the message has no plausible connection to health or supplements
+    #[serde(default)]
+    pub is_off_topic: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -81,7 +84,7 @@ pub enum EngagementLevel {
     DoneSharing,
 }
 
-const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a clinical data extractor. Given a patient's message during a supplement intake interview, extract structured data. Respond ONLY with valid JSON matching this schema:
+const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a clinical data extractor. Given a patient's message during a supplement intake interview (and the preceding interviewer question for context), extract structured data. Respond ONLY with valid JSON matching this schema:
 
 {
   "symptoms": ["symptom phrases mentioned"],
@@ -102,23 +105,34 @@ const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a clinical data extractor. Giv
   "correction_old": null,
   "correction_new": null,
   "engagement": "normal" or "disengaged" or "wants_recommendations" or "done_sharing",
-  "medications": ["prescription drugs or supplements the user mentions taking"]
+  "medications": ["prescription drugs or supplements the user mentions taking"],
+  "is_off_topic": false
 }
 
 Rules:
 - Only extract what the user explicitly stated. Do not infer.
+- "oldcarts.duration" = how long a single episode lasts (e.g. "a couple hours", "30 minutes", "all day"). Capture this even in short answers like "a couple hours until I loosen up".
 - "denied_systems" = systems the user says are fine / not a problem.
 - "engagement": "disengaged" if user gives very short dismissive answers like "idk", "not sure", "skip". "wants_recommendations" ONLY if they explicitly ask for supplement recommendations (e.g., "what should I take?", "just give me the recommendations"). "done_sharing" if the user signals they've said everything (e.g., "that's it", "that's all", "nothing else"). Off-topic questions or asking about non-supplement advice is "normal".
 - "medications": any prescription drugs, OTC medications, or supplements the user says they are currently taking. Only extract what they explicitly state.
 - For severity, only extract if they give a number.
+- "is_off_topic": true ONLY if the message has absolutely no plausible connection to health, symptoms, medications, supplements, or the intake conversation — for example, asking about the weather, politics, sports, coding help, or completely unrelated subjects. Short clinical answers ("a couple hours", "years", "not really", "my left side", "5"), answering a question the interviewer asked, mentioning medications or supplements (even vaguely), correcting the interviewer, or asking about the interview process are all NOT off-topic. Default is false. Only set true when you are certain the message is off-topic.
 - Return empty arrays/null for fields with no data."#;
 
 /// Run the extraction LLM on a user message. Returns structured data.
+/// `preceding_question` is the last thing the bot said — short answers like
+/// "years" or "a couple hours" are uninterpretable without it.
 pub async fn extract_from_message(
     user_message: &str,
+    preceding_question: Option<&str>,
     extractor: &dyn LlmProvider,
 ) -> Extraction {
-    let request = CompletionRequest::new(user_message)
+    let user_turn = match preceding_question {
+        Some(q) => format!("Interviewer: {}\nPatient: {}", q, user_message),
+        None => format!("Patient: {}", user_message),
+    };
+
+    let request = CompletionRequest::new(&user_turn)
         .with_system(EXTRACTION_SYSTEM_PROMPT.to_string())
         .with_max_tokens(512)
         .with_temperature(0.0); // deterministic extraction
@@ -127,7 +141,6 @@ pub async fn extract_from_message(
         Ok(response) => parse_extraction(&response.content),
         Err(e) => {
             eprintln!("[extract] LLM error: {e}");
-            // Fall back to heuristic extraction
             heuristic_extraction(user_message)
         }
     }

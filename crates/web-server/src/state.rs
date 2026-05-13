@@ -48,9 +48,6 @@ impl AppState {
     pub async fn init(
         pg_url: &str,
         api_url: &str,
-        db_url: &str,
-        db_user: &str,
-        db_pass: &str,
         suppkg_path: Option<&str>,
         max_concurrent: usize,
         daily_cap: usize,
@@ -58,13 +55,12 @@ impl AppState {
         session_timeout_secs: u64,
         ip_daily_cap: usize,
     ) -> Self {
-        // Connect to supplementology Postgres (writes) + API (reads) + SurrealDB (intake graph)
-        let graph = KnowledgeGraph::open(pg_url, api_url, db_url, db_user, db_pass)
+        let graph = KnowledgeGraph::open(pg_url, api_url)
             .await
             .expect("failed to connect to knowledge graph databases");
 
         let source = graph.source_store();
-        let merge = MergeStore::new(graph.db());
+        let merge = MergeStore::new(graph.api().clone());
 
         // Load intake config from supplementology API (Postgres-backed)
         let intake_store = PgIntakeStore::load(graph.api()).await;

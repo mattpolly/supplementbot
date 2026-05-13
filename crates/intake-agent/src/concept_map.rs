@@ -7,7 +7,7 @@ use graph_service::types::NodeType;
 //
 // Three-tier approach (unanimous consensus):
 //   1. Exact/alias match (no LLM) — string match + merge table lookup
-//   2. Embedding similarity (no LLM) — future: vector search in SurrealDB
+//   2. Embedding similarity (no LLM) — future: vector search
 //   3. LLM ranker (fallback) — future: pick from top-5 candidates
 //
 // For v1, only tier 1 is implemented. Tiers 2-3 will be added when the

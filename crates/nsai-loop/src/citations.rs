@@ -72,7 +72,7 @@ pub async fn run_citation_backing(
     sink: &dyn EventSink,
     correlation_id: Uuid,
 ) -> CitationBackingResult {
-    let registry = IngredientRegistry::new(graph.db());
+    let registry = IngredientRegistry::new(graph.api().clone());
     run_citation_backing_with_registry(
         graph, suppkg, merge_store, source_store, &registry, sink, correlation_id,
     )
@@ -290,8 +290,8 @@ mod tests {
     async fn test_citation_backing_finds_match_via_merge_store() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
         let source_store = kg.source_store();
-        let merge_store = MergeStore::new(kg.db());
-        let registry = IngredientRegistry::new(kg.db());
+        let merge_store = MergeStore::new(kg.api().clone());
+        let registry = IngredientRegistry::new(kg.api().clone());
         let sink = MemorySink::new();
 
         let json = r#"{
@@ -338,8 +338,8 @@ mod tests {
     async fn test_citation_backing_no_cui_no_match() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
         let source_store = kg.source_store();
-        let merge_store = MergeStore::new(kg.db());
-        let registry = IngredientRegistry::new(kg.db());
+        let merge_store = MergeStore::new(kg.api().clone());
+        let registry = IngredientRegistry::new(kg.api().clone());
         let sink = MemorySink::new();
 
         let json = r#"{
@@ -364,8 +364,8 @@ mod tests {
     async fn test_citation_backing_uses_hardcoded_cui() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
         let source_store = kg.source_store();
-        let merge_store = MergeStore::new(kg.db());
-        let registry = IngredientRegistry::new(kg.db());
+        let merge_store = MergeStore::new(kg.api().clone());
+        let registry = IngredientRegistry::new(kg.api().clone());
         let sink = MemorySink::new();
 
         let json = r#"{
@@ -404,8 +404,8 @@ mod tests {
     async fn test_citation_backing_sentence_search_fallback() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
         let source_store = kg.source_store();
-        let merge_store = MergeStore::new(kg.db());
-        let registry = IngredientRegistry::new(kg.db());
+        let merge_store = MergeStore::new(kg.api().clone());
+        let registry = IngredientRegistry::new(kg.api().clone());
         let sink = MemorySink::new();
 
         // SuppKG where "ashwagandha" has no node but appears in a sentence
@@ -464,8 +464,8 @@ mod tests {
     async fn test_citation_backing_dedup_on_rerun() {
         let kg = KnowledgeGraph::in_memory().await.unwrap();
         let source_store = kg.source_store();
-        let merge_store = MergeStore::new(kg.db());
-        let registry = IngredientRegistry::new(kg.db());
+        let merge_store = MergeStore::new(kg.api().clone());
+        let registry = IngredientRegistry::new(kg.api().clone());
         let sink = MemorySink::new();
 
         let json = r#"{

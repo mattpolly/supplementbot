@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::client::SupplementClient;
 
 // ---------------------------------------------------------------------------
-// Public types — unchanged from the SurrealDB version so callers don't break.
+// Public types for source tracking.
 // ---------------------------------------------------------------------------
 
 /// A PubMed citation backing a specific edge.

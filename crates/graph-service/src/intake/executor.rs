@@ -197,7 +197,9 @@ impl<'a> GraphActionExecutor<'a> {
         };
 
         for symptom in symptoms {
-            for rec in qe.ingredients_for_symptom(symptom, &config).await {
+            let recs = qe.ingredients_for_symptom(symptom, &config).await;
+            crate::debug_log!("[executor] ingredients_for_symptom({:?}) → {} results", symptom, recs.len());
+            for rec in recs {
                 merge_rec(rec);
             }
         }
@@ -206,7 +208,9 @@ impl<'a> GraphActionExecutor<'a> {
         // has no node but maps to "immune system" via the allergy profile),
         // query by system so we still surface relevant candidates.
         for system in systems {
-            for rec in qe.ingredients_for_system(system, &config).await {
+            let recs = qe.ingredients_for_system(system, &config).await;
+            crate::debug_log!("[executor] ingredients_for_system({:?}) → {} results", system, recs.len());
+            for rec in recs {
                 merge_rec(rec);
             }
         }

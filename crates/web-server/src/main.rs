@@ -1,6 +1,10 @@
+#[macro_use]
+pub mod logging;
+
 mod explore;
 mod extract;
 mod handler;
+mod planner;
 mod session_mgr;
 mod state;
 mod symptom_resolver;
@@ -22,6 +26,8 @@ fn load_env() {
 #[tokio::main]
 async fn main() {
     load_env();
+    crate::logging::init();
+    graph_service::logging::init();
 
     // -- Configuration from environment --
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -33,9 +39,6 @@ async fn main() {
         .unwrap_or_else(|_| "postgresql://supplementology:supplementology@localhost:5433/supplementology".to_string());
     let api_url = std::env::var("SUPPLEMENTOLOGY_API_URL")
         .unwrap_or_else(|_| "http://localhost:3001".to_string());
-    let db_url = std::env::var("DB_URL").unwrap_or_else(|_| "ws://localhost:8000".to_string());
-    let db_user = std::env::var("DB_USER").unwrap_or_else(|_| "root".to_string());
-    let db_pass = std::env::var("DB_PASS").unwrap_or_else(|_| "root".to_string());
     let static_dir = std::env::var("STATIC_DIR")
         .expect("STATIC_DIR must be set (path to static site files)");
     let max_concurrent: usize = std::env::var("MAX_CONCURRENT_SESSIONS")
@@ -61,7 +64,6 @@ async fn main() {
     let suppkg_path = std::env::var("SUPPKG_PATH").ok();
 
     eprintln!("supplementbot-web starting...");
-    eprintln!("  db: {db_url}");
     eprintln!("  static: {static_dir}");
     if let Some(ref p) = suppkg_path {
         eprintln!("  SuppKG: {p}");
@@ -73,9 +75,6 @@ async fn main() {
     let state = AppState::init(
         &pg_url,
         &api_url,
-        &db_url,
-        &db_user,
-        &db_pass,
         suppkg_path.as_deref(),
         max_concurrent,
         daily_cap,

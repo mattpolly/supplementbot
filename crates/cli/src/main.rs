@@ -105,8 +105,7 @@ enum Commands {
         confidence: Option<f64>,
     },
 
-    /// Migrate data from an embedded RocksDB graph to the SurrealDB server.
-    /// Destination is configured via DB_URL / DB_USER / DB_PASS env vars.
+    /// Migrate data from an embedded RocksDB graph to the graph server.
     Migrate {
         /// Path to the existing embedded RocksDB graph directory
         #[arg(long)]
@@ -153,13 +152,6 @@ enum QueryType {
     },
     /// List all ingredients the graph has been trained on
     List,
-}
-
-fn db_connection() -> (String, String, String) {
-    let url = std::env::var("DB_URL").unwrap_or_else(|_| "ws://localhost:8000".to_string());
-    let user = std::env::var("DB_USER").unwrap_or_else(|_| "root".to_string());
-    let pass = std::env::var("DB_PASS").unwrap_or_else(|_| "root".to_string());
-    (url, user, pass)
 }
 
 fn pg_url() -> String {
@@ -321,9 +313,8 @@ async fn run_migrate(_from: &str) {
 }
 
 async fn run_confirm_edges(ingredient: Option<String>, supplementology_url: String) {
-    let (db_url, db_user, db_pass) = db_connection();
 
-    let graph = KnowledgeGraph::open(&pg_url(), &api_url(), &db_url, &db_user, &db_pass).await
+    let graph = KnowledgeGraph::open(&pg_url(), &api_url()).await
         .expect("failed to connect to graph DB");
     let source_store = graph.source_store();
 
@@ -480,8 +471,7 @@ async fn run_query(
     quality_str: Option<String>,
     min_confidence: Option<f64>,
 ) {
-    let (db_url, db_user, db_pass) = db_connection();
-    let graph = match KnowledgeGraph::open(&pg_url(), &api_url(), &db_url, &db_user, &db_pass).await {
+    let graph = match KnowledgeGraph::open(&pg_url(), &api_url()).await {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error opening graph database: {}", e);
@@ -496,7 +486,7 @@ async fn run_query(
     }
 
     let source = graph.source_store();
-    let merge = MergeStore::new(graph.db());
+    let merge = MergeStore::new(graph.api().clone());
     let engine = QueryEngine::new(&graph, &source, &merge).await;
 
     let lens = parse_lens(&lens_str);
@@ -658,7 +648,6 @@ async fn main() {
 
     let nutraceuticals: Vec<String> = cli.nutraceutical.iter().map(|s| s.trim().to_string()).collect();
 
-    let (db_path, db_user, db_pass) = db_connection();
 
     let ingestion_lens = parse_lens(&cli.lens);
 
@@ -670,7 +659,7 @@ async fn main() {
     println!("  Provider:       {}", cli.provider);
     println!("  Lens:           {} ({})", cli.lens, ingestion_lens.level());
     println!("  Event log:      {}", cli.output);
-    println!("  Graph DB:       {}", db_path);  // db_path is now the URL
+    println!("  Graph API:      {}", api_url());
     println!("  Max iterations: {}", cli.max_iterations);
     println!("  Max gaps/iter:  {}", cli.max_gaps);
     println!();
@@ -694,8 +683,8 @@ async fn main() {
         }
     };
 
-    // Connect to supplementology Postgres + SurrealDB (intake graph)
-    let graph = match KnowledgeGraph::open(&pg_url(), &api_url(), &db_path, &db_user, &db_pass).await {
+    // Connect to supplementology Postgres + API
+    let graph = match KnowledgeGraph::open(&pg_url(), &api_url()).await {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error opening graph database: {}", e);
@@ -738,9 +727,9 @@ async fn main() {
         return;
     }
 
-    // Create source store (Postgres) and merge store (SurrealDB)
+    // Create source store (Postgres) and merge store
     let source_store = graph.source_store();
-    let merge_store = MergeStore::new(graph.db());
+    let merge_store = MergeStore::new(graph.api().clone());
 
     // --resolve-cuis: populate merge store CUIs from SuppKG and exit (no LLM)
     if cli.resolve_cuis {
@@ -831,209 +820,11 @@ async fn main() {
         return;
     }
 
-    // --hydrate-registry: populate ingredient registry from external data and exit
-    if let Some(ref data_dir) = cli.hydrate_registry {
-        use graph_service::registry::{IngredientRecord, IngredientRegistry};
-
-        let registry = IngredientRegistry::new(graph.db());
-        let before = registry.count().await;
-
-        println!("  Hydrating ingredient registry from {} ...", data_dir);
-
-        // Collect all ingredient names currently in the graph
-        let ingredient_nodes = graph.nodes_by_type(&graph_service::types::NodeType::Ingredient).await;
-        let mut ingredient_names: Vec<String> = Vec::new();
-        for idx in &ingredient_nodes {
-            if let Some(nd) = graph.node_data(idx).await {
-                ingredient_names.push(nd.name.to_lowercase());
-            }
-        }
-        println!("  Found {} ingredients in graph", ingredient_names.len());
-
-        // ── Load iDISK DSI.csv ──────────────────────────────────────────
-        let idisk_path = format!("{}/idisk2/Entity/DSI.csv", data_dir);
-        let mut idisk_map: std::collections::HashMap<String, (String, String, Vec<String>, String)> =
-            std::collections::HashMap::new(); // name -> (idisk_id, cui, common_names, moa)
-
-        if let Ok(mut rdr) = csv::Reader::from_path(&idisk_path) {
-            for result in rdr.records() {
-                if let Ok(record) = result {
-                    let idisk_id = record.get(0).unwrap_or("").to_string();
-                    let name = record.get(1).unwrap_or("").to_lowercase();
-                    let cui = record.get(2).unwrap_or("").to_string();
-                    let common_names_raw = record.get(7).unwrap_or("");
-                    let common_names: Vec<String> = common_names_raw
-                        .split('|')
-                        .map(|s| s.trim().to_lowercase())
-                        .filter(|s| !s.is_empty() && s.len() > 1)
-                        .collect();
-                    let moa = record.get(5).unwrap_or("").to_string(); // Mechanism of action
-
-                    // Index by name and common names
-                    idisk_map.insert(name.clone(), (idisk_id.clone(), cui.clone(), common_names.clone(), moa.clone()));
-                    for cn in &common_names {
-                        idisk_map.entry(cn.clone())
-                            .or_insert((idisk_id.clone(), cui.clone(), common_names.clone(), moa.clone()));
-                    }
-                }
-            }
-            println!("  Loaded {} iDISK entries", idisk_map.len());
-        } else {
-            println!("  Warning: could not read {}", idisk_path);
-        }
-
-        // ── Load supplement_cuis.jsonl ──────────────────────────────────
-        let cuis_path = format!("{}/supplement_cuis.jsonl", data_dir);
-        let mut umls_map: std::collections::HashMap<String, (String, Vec<String>)> =
-            std::collections::HashMap::new(); // name -> (cui, synonyms)
-
-        if let Ok(content) = std::fs::read_to_string(&cuis_path) {
-            for line in content.lines() {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                    let ingredient = val["ingredient"].as_str().unwrap_or("").to_lowercase();
-                    let cui = val["canonical_cui"].as_str().unwrap_or("").to_string();
-                    let synonyms: Vec<String> = val["synonyms"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|s| s["name"].as_str().map(|n| n.to_lowercase()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    umls_map.insert(ingredient, (cui, synonyms));
-                }
-            }
-            println!("  Loaded {} UMLS CUI entries", umls_map.len());
-        } else {
-            println!("  Warning: could not read {}", cuis_path);
-        }
-
-        // ── Load CTD chemicals ──────────────────────────────────────────
-        let ctd_path = format!("{}/ctd/CTD_chemicals.csv", data_dir);
-        let mut ctd_map: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new(); // lowercase name/synonym -> mesh_id
-
-        if let Ok(content) = std::fs::read_to_string(&ctd_path) {
-            for line in content.lines() {
-                if line.starts_with('#') { continue; }
-                // CSV format: ChemicalName,ChemicalID,...,MESHSynonyms,CTDCuratedSynonyms
-                let parts: Vec<&str> = line.splitn(13, ',').collect();
-                if parts.len() >= 2 {
-                    let chem_name = parts[0].trim_matches('"').to_lowercase();
-                    let mesh_id = parts[1].replace("MESH:", "");
-                    ctd_map.insert(chem_name.clone(), mesh_id.clone());
-
-                    // Also index synonyms (field 11 = MESHSynonyms, field 12 = CTDCuratedSynonyms)
-                    if parts.len() >= 12 {
-                        for syn in parts[11].split('|') {
-                            let s = syn.trim().to_lowercase();
-                            if !s.is_empty() {
-                                ctd_map.entry(s).or_insert(mesh_id.clone());
-                            }
-                        }
-                    }
-                }
-            }
-            println!("  Loaded {} CTD chemical entries", ctd_map.len());
-        } else {
-            println!("  Warning: could not read {} (run may still succeed)", ctd_path);
-        }
-
-        // ── Curated search terms for known ingredients ──────────────────
-        // These are terms we know work well for SuppKG sentence search,
-        // based on our analysis of the 19 test ingredients.
-        let curated_search_terms: std::collections::HashMap<&str, Vec<&str>> = [
-            ("magnesium", vec!["magnesium"]),
-            ("quercetin", vec!["quercetin"]),
-            ("zinc", vec!["zinc"]),
-            ("vitamin d", vec!["vitamin d", "cholecalciferol", "calciferol"]),
-            ("vitamin c", vec!["vitamin c", "ascorbic acid"]),
-            ("ashwagandha", vec!["ashwagandha", "withania"]),
-            ("probiotics", vec!["probiotic", "lactobacill", "bifidobact"]),
-            ("coq10", vec!["coq10", "coenzyme q", "ubiquinone", "ubiquinol"]),
-            ("nac", vec!["n-acetylcysteine", "n-acetyl-l-cysteine", "n-acetyl cysteine"]),
-            ("rhodiola rosea", vec!["rhodiola"]),
-            ("vitamin b complex", vec!["vitamin b", "b-vitamin", "b vitamin"]),
-            ("alpha-lipoic acid", vec!["alpha-lipoic", "lipoic acid"]),
-            ("melatonin", vec!["melatonin"]),
-            ("fish oil", vec!["fish oil", "omega-3", "omega 3"]),
-            ("turmeric", vec!["turmeric", "curcumin"]),
-            ("iron", vec!["iron"]),
-            ("calcium", vec!["calcium"]),
-            ("gaba", vec!["gamma-aminobutyric", "gaba"]),
-            ("theanine", vec!["theanine", "l-theanine"]),
-        ].iter().cloned().collect();
-
-        // ── Build registry records ──────────────────────────────────────
-        let mut upserted = 0;
-        for name in &ingredient_names {
-            let umls_data = umls_map.get(name.as_str());
-            let idisk_data = idisk_map.get(name.as_str());
-            let ctd_mesh = ctd_map.get(name.as_str()).cloned().unwrap_or_default();
-
-            // Build synonyms from all sources
-            let mut synonyms: Vec<String> = Vec::new();
-            if let Some((_, syns)) = umls_data {
-                synonyms.extend(syns.iter().cloned());
-            }
-            if let Some((_, _, common_names, _)) = idisk_data {
-                for cn in common_names {
-                    if !synonyms.contains(cn) {
-                        synonyms.push(cn.clone());
-                    }
-                }
-            }
-            // Deduplicate and remove the name itself
-            synonyms.retain(|s| s != name && !s.is_empty());
-            synonyms.sort();
-            synonyms.dedup();
-
-            // Search terms: use curated if available, else name + key synonyms
-            let search_terms = if let Some(curated) = curated_search_terms.get(name.as_str()) {
-                curated.iter().map(|s| s.to_string()).collect()
-            } else {
-                // For uncurated ingredients, use name as search term
-                vec![name.clone()]
-            };
-
-            let record = IngredientRecord {
-                name: name.clone(),
-                synonyms,
-                search_terms,
-                umls_cui: umls_data.map(|(cui, _)| cui.clone()).unwrap_or_default(),
-                idisk_id: idisk_data.map(|(id, _, _, _)| id.clone()).unwrap_or_default(),
-                idisk_cui: idisk_data.map(|(_, cui, _, _)| cui.clone()).unwrap_or_default(),
-                ctd_mesh,
-                suppkg_cui: String::new(), // Populated by CUI resolution, not hydration
-            };
-
-            registry.upsert(&record).await;
-            upserted += 1;
-        }
-
-        let after = registry.count().await;
-        println!();
-        println!("─── Ingredient Registry ────────────────────────────────");
-        println!("  {} ingredients hydrated ({} existed before)", upserted, before);
-        println!("  {} total in registry", after);
-
-        // Print summary
-        let all = registry.list_all().await;
-        for rec in &all {
-            let sources: Vec<&str> = [
-                if !rec.umls_cui.is_empty() { Some("UMLS") } else { None },
-                if !rec.idisk_id.is_empty() { Some("iDISK") } else { None },
-                if !rec.ctd_mesh.is_empty() { Some("CTD") } else { None },
-            ].into_iter().flatten().collect();
-            println!(
-                "    {:<25} search_terms: {:?}  sources: [{}]",
-                rec.name,
-                rec.search_terms,
-                sources.join(", ")
-            );
-        }
-        println!();
-
+    // --hydrate-registry: ingredient registry now lives in supplementology (entity/synonym/external_id tables).
+    // Use the supplementology ETL importers to populate it; this CLI flag is a no-op.
+    if let Some(_data_dir) = cli.hydrate_registry {
+        eprintln!("--hydrate-registry is no longer supported. The ingredient registry now lives in supplementology.");
+        eprintln!("Run the supplementology importers (etl/) to populate entity/synonym/external_id tables.");
         return;
     }
 
