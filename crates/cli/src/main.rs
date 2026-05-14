@@ -419,13 +419,33 @@ async fn run_confirm_edges(ingredient: Option<String>, supplementology_url: Stri
             }
         }
 
-        // Also handle effectiveness relationships from iDISK/CTD
+        // Also handle effectiveness relationships from iDISK/CTD.
+        // For each matched condition, find a real PMID from the evidence_claims
+        // that mentions the condition — skip entirely if none exists.
         if let Some(effectiveness) = feed["effectiveness"].as_array() {
+            let all_claims = feed["evidence_claims"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
             for eff in effectiveness {
                 let cond_lower = eff["condition_name"].as_str().unwrap_or("").to_lowercase();
+                if cond_lower.is_empty() { continue; }
+
                 for (i, (target_lower, edge_type)) in edge_info.iter().enumerate() {
                     if edge_type != "is_effective_for" { continue; }
-                    if target_lower.contains(&cond_lower) || cond_lower.contains(target_lower.as_str()) {
+                    if !target_lower.contains(&cond_lower) && !cond_lower.contains(target_lower.as_str()) {
+                        continue;
+                    }
+
+                    // Find a real-PMID claim whose text mentions this condition
+                    let backing = all_claims.iter().find(|c| {
+                        let pmid = c["citation"]["pmid"].as_str().unwrap_or("");
+                        if pmid.is_empty() || pmid.parse::<u64>().is_err() { return false; }
+                        let text = (c["claim_text"].as_str().unwrap_or("").to_owned()
+                            + c["outcome"].as_str().unwrap_or("")
+                            + c["mechanism"].as_str().unwrap_or("")).to_lowercase();
+                        text.contains(&cond_lower)
+                    });
+
+                    if let Some(claim) = backing {
+                        let pmid = claim["citation"]["pmid"].as_str().unwrap_or("").to_string();
                         let target_name = graph.node_data(&outgoing[i].0).await
                             .map(|d| d.name)
                             .unwrap_or_default();
@@ -433,10 +453,8 @@ async fn run_confirm_edges(ingredient: Option<String>, supplementology_url: Stri
                             source_node: ingredient_name.clone(),
                             target_node: target_name,
                             edge_type: edge_type.clone(),
-                            pmid: format!("suppl:{}/{}", slug, cond_lower.replace(' ', "_")),
-                            sentence: format!("{} is effective for {}",
-                                ingredient_name,
-                                eff["condition_name"].as_str().unwrap_or("")),
+                            pmid,
+                            sentence: claim["claim_text"].as_str().unwrap_or("").to_string(),
                             confidence: eff["confidence"].as_f64().unwrap_or(0.8),
                             suppkg_predicate: "supplementology_effectiveness".to_string(),
                             source_cui: String::new(),
@@ -446,8 +464,8 @@ async fn run_confirm_edges(ingredient: Option<String>, supplementology_url: Stri
                         if source_store.record_citation(&record).await {
                             ingredient_new += 1;
                         }
-                        break;
                     }
+                    break;
                 }
             }
         }
