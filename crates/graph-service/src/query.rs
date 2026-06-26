@@ -137,6 +137,9 @@ pub struct ArchetypeCoverage {
 /// Named traversal patterns through the ontology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecommendationPattern {
+    /// Symptom ←(alias/CUI match)→ Condition ←[is_effective_for]← Ingredient
+    /// Most specific: direct clinical evidence for this symptom/condition.
+    DirectCondition,
     /// Symptom →[presents_in]→ System ←[acts_on]← Ingredient
     DirectSystem,
     /// Symptom →[presents_in]→ System ←[modulates]← Mechanism ←[via_mechanism]← Ingredient
@@ -363,6 +366,12 @@ impl<'a> QueryEngine<'a> {
         let patterns = self.applicable_patterns(config);
         for pattern in patterns {
             match pattern {
+                RecommendationPattern::DirectCondition => {
+                    let paths = self
+                        .pattern_direct_condition(&symptom_data, config)
+                        .await;
+                    all_paths.extend(paths);
+                }
                 RecommendationPattern::DirectSystem => {
                     let paths = self
                         .pattern_direct_system(&symptom_idx, &symptom_data, config)
@@ -622,6 +631,11 @@ impl<'a> QueryEngine<'a> {
     /// Which patterns are applicable at this lens level?
     fn applicable_patterns(&self, config: &QueryConfig) -> Vec<RecommendationPattern> {
         let mut patterns = vec![];
+        // DirectCondition: is_effective_for — foundational, always visible. Checked first
+        // because it is the most specific evidence and should score highest.
+        if config.lens.can_see_edge(&EdgeType::IsEffectiveFor) {
+            patterns.push(RecommendationPattern::DirectCondition);
+        }
         // DirectSystem needs: presents_in + acts_on (both foundational, always visible)
         if config.lens.can_see_edge(&EdgeType::PresentsIn)
             && config.lens.can_see_edge(&EdgeType::ActsOn)
@@ -737,6 +751,122 @@ impl<'a> QueryEngine<'a> {
                 results.push((ingr_idx.clone(), ingr_data, path));
             }
         }
+
+        results
+    }
+
+    /// Pattern: Symptom ←(alias match)→ Symptom ←[is_effective_for]← Ingredient
+    ///
+    /// Uses the alias store to find Symptom nodes whose name resolves to this
+    /// symptom (or vice-versa), then walks incoming is_effective_for edges.
+    /// This is the most specific evidence tier — direct clinical association.
+    /// Score gets a 1.5× specificity bonus vs the system-level path.
+    ///
+    /// SAFETY: this pattern only ever resolves to `Symptom` nodes. `Condition`
+    /// (disease) nodes are deliberately excluded — surfacing a disease name in a
+    /// recommendation would constitute diagnosing/treating a disease, which is
+    /// unlawful for a non-clinician. The exclusion is structural (below), not a
+    /// downstream filter, so disease names cannot reach output by construction.
+    async fn pattern_direct_condition(
+        &self,
+        symptom_data: &NodeData,
+        config: &QueryConfig,
+    ) -> Vec<(NodeIndex, NodeData, TraversalPath)> {
+        let mut results = Vec::new();
+
+        // Collect candidate symptom names: the symptom's own name plus any
+        // names that alias-resolve to it (e.g. "tension headache" for "headache").
+        let symptom_lower = symptom_data.name.to_lowercase();
+        let mut candidate_names: Vec<String> = vec![symptom_lower.clone()];
+
+        // Also look up what aliases point to this symptom canonical
+        let aliases = self.merge.aliases_for(&symptom_lower).await;
+        for a in &aliases {
+            candidate_names.push(a.alias.to_lowercase());
+            candidate_names.push(a.canonical.to_lowercase());
+        }
+        candidate_names.sort();
+        candidate_names.dedup();
+
+        crate::debug_log!(
+            "[query] direct_condition: symptom={:?} candidate_symptoms={:?}",
+            symptom_lower, candidate_names
+        );
+
+        for cand_name in &candidate_names {
+            let cond_idx = match self.graph.find_node(cand_name).await {
+                Some(idx) => idx,
+                None => continue,
+            };
+            // SAFETY: Symptom only. A `Condition` (disease) node that happens to
+            // alias-resolve here is skipped — we never surface disease names.
+            let cond_data = match self.graph.node_data(&cond_idx).await {
+                Some(d) if matches!(d.node_type, NodeType::Symptom) => d,
+                _ => continue,
+            };
+
+            // Walk incoming is_effective_for edges: Ingredient →[is_effective_for]→ Symptom
+            let incoming = self.graph.incoming_edges(&cond_idx).await;
+            for (ingr_idx, edge) in &incoming {
+                if edge.edge_type != EdgeType::IsEffectiveFor {
+                    continue;
+                }
+                let ingr_data = match self.graph.node_data(ingr_idx).await {
+                    Some(d) if d.node_type == NodeType::Ingredient => d,
+                    _ => continue,
+                };
+                if !self.edge_passes(edge, &ingr_data.name, &cond_data.name, config) {
+                    continue;
+                }
+
+                let q = self.edge_quality(
+                    &ingr_data.name,
+                    &cond_data.name,
+                    &edge.edge_type.to_string(),
+                );
+                // 1.5× bonus: direct clinical evidence is more specific than system-level
+                let score = score_path(&[edge.metadata.confidence], q, config.lens.level()) * 1.5;
+
+                let explanation = vec![
+                    format!(
+                        "{} has direct clinical evidence for {} ({})",
+                        ingr_data.name,
+                        cond_data.name,
+                        if cond_data.name.to_lowercase() == symptom_lower {
+                            "exact match"
+                        } else {
+                            "via symptom alias"
+                        }
+                    ),
+                ];
+
+                let path = TraversalPath {
+                    steps: vec![
+                        PathStep::Node {
+                            index: ingr_idx.clone(),
+                            data: ingr_data.clone(),
+                        },
+                        PathStep::Edge {
+                            data: edge.clone(),
+                            direction: EdgeDirection::Reverse,
+                        },
+                        PathStep::Node {
+                            index: cond_idx.clone(),
+                            data: cond_data.clone(),
+                        },
+                    ],
+                    score,
+                    explanation,
+                };
+
+                results.push((ingr_idx.clone(), ingr_data, path));
+            }
+        }
+
+        crate::debug_log!(
+            "[query] direct_condition: found {} candidates for {:?}",
+            results.len(), symptom_lower
+        );
 
         results
     }
@@ -1496,6 +1626,87 @@ mod tests {
             "explanation should reference symptom and system: {}",
             joined
         );
+    }
+
+    #[tokio::test]
+    async fn test_is_effective_for_surfaces_symptom_evidence() {
+        // Happy path: Ingredient →[is_effective_for]→ Symptom is surfaced as the
+        // most-specific evidence tier and names the symptom in the explanation.
+        let (kg, source, merge) = build_test_graph().await;
+
+        let cramps = kg.find_node("Muscle Cramps").await.unwrap();
+        let mag = kg.find_node("Magnesium").await.unwrap();
+        kg.add_edge(
+            &mag,
+            &cramps,
+            EdgeData::new(EdgeType::IsEffectiveFor, EdgeMetadata::extracted(0.92, 1, 0)),
+        )
+        .await;
+
+        let engine = QueryEngine::new(&kg, &source, &merge).await;
+        let results = engine
+            .ingredients_for_symptom("Muscle Cramps", &QueryConfig::default())
+            .await;
+
+        let mag_res = results
+            .iter()
+            .find(|r| r.ingredient.name == "Magnesium")
+            .expect("magnesium should be recommended");
+        let joined: String = mag_res
+            .paths
+            .iter()
+            .flat_map(|p| p.explanation.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            joined.contains("direct clinical evidence")
+                && joined.to_lowercase().contains("muscle cramps"),
+            "expected direct-evidence explanation naming the symptom, got: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_effective_for_never_surfaces_a_disease_name() {
+        // SAFETY / LEGAL: we cannot diagnose or recommend for diseases. Even if an
+        // is_effective_for edge to a Condition (disease) node is present in the
+        // graph AND that disease alias-resolves to the user's symptom, the query
+        // must never surface the disease name. The DirectCondition pattern is
+        // Symptom-only by construction, so the disease must not appear anywhere in
+        // the candidate explanations.
+        let (kg, source, merge) = build_test_graph().await;
+
+        // A disease node, plus a (bad-data) clinical-evidence edge pointing at it.
+        let disease = kg
+            .add_node(NodeData::new("Restless Legs Syndrome", NodeType::Condition))
+            .await;
+        let mag = kg.find_node("Magnesium").await.unwrap();
+        kg.add_edge(
+            &mag,
+            &disease,
+            EdgeData::new(EdgeType::IsEffectiveFor, EdgeMetadata::extracted(0.99, 1, 0)),
+        )
+        .await;
+        // Make the disease alias-resolve to the user's symptom, so the only thing
+        // protecting us is the Symptom-only node-type check (not the alias layer).
+        merge
+            .record_alias("muscle cramps", "restless legs syndrome", 0.9, "test")
+            .await;
+
+        let engine = QueryEngine::new(&kg, &source, &merge).await;
+        let results = engine
+            .ingredients_for_symptom("Muscle Cramps", &QueryConfig::default())
+            .await;
+
+        for r in &results {
+            for p in &r.paths {
+                for e in &p.explanation {
+                    assert!(
+                        !e.to_lowercase().contains("restless legs syndrome"),
+                        "disease name leaked into a recommendation explanation: {e}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

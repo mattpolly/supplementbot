@@ -135,12 +135,14 @@ pub fn build_context(
         prompt.push_str("  (no candidates yet — need chief complaint first)\n");
     } else {
         for (i, c) in session.candidates.top(5).iter().enumerate() {
+            let evidence_scope = candidate_evidence_scope(c);
             prompt.push_str(&format!(
-                "  {}. {} (score: {:.2}, quality: {:?})",
+                "  {}. {} (score: {:.2}, quality: {:?}, evidence: {})",
                 i + 1,
                 c.ingredient,
                 c.composite_score,
                 c.quality,
+                evidence_scope,
             ));
             if !c.per_symptom_scores.is_empty() {
                 let scores: Vec<String> = c
@@ -347,12 +349,14 @@ pub fn build_context_v2(
     if !session.candidates.is_empty() {
         prompt.push_str("CURRENT CANDIDATES (ranked):\n");
         for (i, c) in session.candidates.top(5).iter().enumerate() {
+            let evidence_scope = candidate_evidence_scope(c);
             prompt.push_str(&format!(
-                "  {}. {} (score: {:.2}, quality: {:?})\n",
+                "  {}. {} (score: {:.2}, quality: {:?}, evidence: {})\n",
                 i + 1,
                 c.ingredient,
                 c.composite_score,
                 c.quality,
+                evidence_scope,
             ));
         }
         prompt.push('\n');
@@ -583,6 +587,16 @@ pub fn build_context_v2(
                          Frame as: \"For symptoms like yours, the literature suggests X\n\
                          may help support...\" — you are REPORTING findings, not prescribing.\n\
                          Never say \"take X\" or \"you should try X.\"\n\
+                         CRITICAL — be honest about evidence scope using the 'evidence' field:\n\
+                         - evidence=specific: the literature directly links this supplement to\n\
+                           the user's symptom or condition. Say so: \"for headache specifically\"\n\
+                           or \"studies on migraine show\".\n\
+                         - evidence=general: the supplement supports the relevant body system\n\
+                           but has no direct evidence for this symptom. Be explicit: \"for\n\
+                           general nervous system support\" or \"no direct headache research,\n\
+                           but it supports the systems involved\".\n\
+                         Do NOT present general-evidence candidates as if they have specific\n\
+                         symptom research — that is dishonest and harms user trust.\n\
                          For each permitted supplement: which systems it supports and why relevant.\n\
                          Use the MECHANISM OF ACTION text above for sourced explanations.\n\
                          Mention evidence quality and any interaction warnings.\n\
@@ -703,6 +717,16 @@ fn format_field(buf: &mut String, label: &str, val: &Option<String>) {
     match val {
         Some(v) => buf.push_str(&format!("  {}: {}\n", label, v)),
         None => buf.push_str(&format!("  {}: (not yet asked)\n", label)),
+    }
+}
+
+fn candidate_evidence_scope(c: &crate::candidates::Candidate) -> &'static str {
+    if c.supporting_paths.iter().any(|p| {
+        p.explanation.iter().any(|e| e.contains("direct clinical evidence"))
+    }) {
+        "specific"
+    } else {
+        "general"
     }
 }
 

@@ -467,6 +467,7 @@ fn edge_type_to_pg(et: &EdgeType) -> &'static str {
         EdgeType::Desensitizes => "desensitizes",
         EdgeType::PositivelyReinforces => "positively_reinforces",
         EdgeType::Gates => "gates",
+        EdgeType::IsEffectiveFor => "is_effective_for",
     }
 }
 
@@ -486,6 +487,7 @@ fn pg_to_edge_type(s: &str) -> Option<EdgeType> {
         "desensitizes" => Some(EdgeType::Desensitizes),
         "positively_reinforces" => Some(EdgeType::PositivelyReinforces),
         "gates" => Some(EdgeType::Gates),
+        "is_effective_for" => Some(EdgeType::IsEffectiveFor),
         _ => None,
     }
 }

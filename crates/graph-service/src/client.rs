@@ -872,6 +872,7 @@ fn api_str_to_edge_type(s: &str) -> Option<EdgeType> {
         "affords" => Some(EdgeType::Affords),
         "presents_in" => Some(EdgeType::PresentsIn),
         "modulates" => Some(EdgeType::Modulates),
+        "is_effective_for" => Some(EdgeType::IsEffectiveFor),
         "contraindicated_with" => Some(EdgeType::ContraindicatedWith),
         "competes_with" => Some(EdgeType::CompetesWith),
         "disinhibits" => Some(EdgeType::Disinhibits),

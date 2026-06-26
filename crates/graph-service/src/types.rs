@@ -140,6 +140,9 @@ pub enum EdgeType {
     /// Ingredient or Mechanism modulates (gain control) a System or Mechanism
     Modulates,
 
+    /// Ingredient is effective for a Condition (CTD/clinical evidence)
+    IsEffectiveFor,
+
     // ── Intermediate (0.3–0.5) — 10th grade biology ─────────────────────
     /// Ingredient is contraindicated with another Ingredient or Mechanism
     ContraindicatedWith,
@@ -175,6 +178,7 @@ impl EdgeType {
             EdgeType::Affords => 0.0,
             EdgeType::PresentsIn => 0.0,
             EdgeType::Modulates => 0.0,
+            EdgeType::IsEffectiveFor => 0.0,
 
             // Intermediate — 10th grade biology
             EdgeType::ContraindicatedWith => 0.3,
@@ -223,8 +227,12 @@ impl EdgeType {
     pub fn is_invalid_pair(&self, source: &NodeType, target: &NodeType) -> bool {
         use NodeType::*;
 
-        // Condition nodes can ONLY be the target of contraindicated_with.
-        // This is the structural defense preventing medical claims in the graph.
+        // Condition (disease) nodes can ONLY be the target of contraindicated_with.
+        // This is the structural defense preventing medical claims in the graph:
+        // we cannot diagnose or recommend for diseases (only a clinician may), so a
+        // disease node must never be reachable by an evidence/recommendation edge.
+        // is_effective_for is therefore NOT permitted on Condition nodes — its valid
+        // clinical-evidence target is a Symptom (handled below).
         if matches!(source, Condition) || matches!(target, Condition) {
             return !matches!(self, EdgeType::ContraindicatedWith);
         }
@@ -233,6 +241,11 @@ impl EdgeType {
             // presents_in is strictly Symptom → System
             EdgeType::PresentsIn => {
                 !matches!(source, Symptom) || !matches!(target, System)
+            }
+            // is_effective_for is strictly Ingredient → Symptom (clinical evidence
+            // for a symptom, e.g. "headache" — never a disease).
+            EdgeType::IsEffectiveFor => {
+                !matches!(source, Ingredient) || !matches!(target, Symptom)
             }
             // acts_on should have Ingredient as source, System as target
             EdgeType::ActsOn => {
@@ -265,6 +278,7 @@ impl EdgeType {
             EdgeType::Desensitizes => "desensitizes: prolonged exposure reduces sensitivity",
             EdgeType::PositivelyReinforces => "positively_reinforces: output feeds back to increase its own input",
             EdgeType::Gates => "gates: all-or-nothing activation above a threshold",
+            EdgeType::IsEffectiveFor => "is_effective_for: Ingredient → Condition (direct clinical evidence)",
         }
     }
 }
@@ -279,6 +293,7 @@ impl std::str::FromStr for EdgeType {
             "affords" => Ok(EdgeType::Affords),
             "presents_in" => Ok(EdgeType::PresentsIn),
             "modulates" => Ok(EdgeType::Modulates),
+            "is_effective_for" => Ok(EdgeType::IsEffectiveFor),
             "contraindicated_with" => Ok(EdgeType::ContraindicatedWith),
             "competes_with" => Ok(EdgeType::CompetesWith),
             "disinhibits" => Ok(EdgeType::Disinhibits),
@@ -300,6 +315,7 @@ impl fmt::Display for EdgeType {
             EdgeType::ViaMechanism => write!(f, "via_mechanism"),
             EdgeType::Affords => write!(f, "affords"),
             EdgeType::PresentsIn => write!(f, "presents_in"),
+            EdgeType::IsEffectiveFor => write!(f, "is_effective_for"),
             EdgeType::ContraindicatedWith => write!(f, "contraindicated_with"),
             EdgeType::Modulates => write!(f, "modulates"),
             EdgeType::CompetesWith => write!(f, "competes_with"),
@@ -460,5 +476,72 @@ impl fmt::Display for EdgeData {
             "{} [confidence: {:.2}, {:?}, epoch: {}]",
             self.edge_type, self.metadata.confidence, self.metadata.source, self.metadata.epoch
         )
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+
+    // The legal/safety boundary: we cannot diagnose or recommend for diseases.
+    // Disease (`Condition`) nodes must NEVER be reachable by an evidence or
+    // recommendation edge — they may only be the target of `contraindicated_with`,
+    // which is used solely for safety filtering and never surfaced to users.
+
+    #[test]
+    fn is_effective_for_is_valid_for_ingredient_to_symptom() {
+        // The intended use: e.g. "magnesium is_effective_for headache".
+        assert!(
+            EdgeType::IsEffectiveFor.is_valid_pair(&NodeType::Ingredient, &NodeType::Symptom),
+            "is_effective_for must be allowed from Ingredient to Symptom"
+        );
+    }
+
+    #[test]
+    fn is_effective_for_is_rejected_for_any_condition() {
+        // A disease as the target of clinical-evidence == diagnosing/treating a
+        // disease. This must be structurally rejected.
+        assert!(
+            EdgeType::IsEffectiveFor.is_invalid_pair(&NodeType::Ingredient, &NodeType::Condition),
+            "is_effective_for must NOT be allowed to target a Condition (disease)"
+        );
+        assert!(
+            EdgeType::IsEffectiveFor.is_invalid_pair(&NodeType::Condition, &NodeType::Ingredient),
+            "is_effective_for must NOT be allowed from a Condition (disease)"
+        );
+    }
+
+    #[test]
+    fn is_effective_for_rejects_non_symptom_targets() {
+        // Guard against the edge silently pointing at structural node types.
+        for bad_target in [NodeType::System, NodeType::Mechanism, NodeType::Ingredient] {
+            assert!(
+                EdgeType::IsEffectiveFor.is_invalid_pair(&NodeType::Ingredient, &bad_target),
+                "is_effective_for should only target Symptom, not {bad_target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contraindicated_with_remains_the_only_edge_allowed_on_conditions() {
+        // The pre-existing structural defense: Condition nodes accept only
+        // contraindicated_with. Verify the relaxation did not widen this.
+        for et in [
+            EdgeType::IsEffectiveFor,
+            EdgeType::ActsOn,
+            EdgeType::Modulates,
+            EdgeType::ViaMechanism,
+            EdgeType::PresentsIn,
+        ] {
+            assert!(
+                et.is_invalid_pair(&NodeType::Ingredient, &NodeType::Condition),
+                "{et:?} must be rejected when targeting a Condition"
+            );
+        }
+        assert!(
+            EdgeType::ContraindicatedWith
+                .is_valid_pair(&NodeType::Ingredient, &NodeType::Condition),
+            "contraindicated_with must remain valid for safety filtering on Conditions"
+        );
     }
 }
